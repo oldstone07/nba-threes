@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Threes Engine</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #12161b; --rule: #222932; --ink: #d8dee6; --muted: #7c8794;
+    --cyan: #36c5d8; --amber: #e6a94a; --win: #4fbf7a; --loss: #e06666;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 var(--mono); }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap;
+           border-bottom: 1px solid var(--rule); padding-bottom: 10px; }
+  h1 { font-size: 18px; letter-spacing: .12em; text-transform: uppercase; margin: 0; }
+  h1 span { color: var(--cyan); }
+  .meta { color: var(--muted); font-size: 12px; }
+  h2 { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted);
+       margin: 28px 0 8px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+  .tile { background: var(--panel); border: 1px solid var(--rule); padding: 10px 12px; }
+  .tile b { display: block; font-size: 22px; font-weight: 600; }
+  .tile small { color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+  .wrap { overflow-x: auto; border: 1px solid var(--rule); background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; white-space: nowrap; }
+  th, td { padding: 6px 10px; text-align: right; border-bottom: 1px solid var(--rule); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+  th:first-child, td:first-child, td.l { text-align: left; }
+  tr:last-child td { border-bottom: 0; }
+  .over { color: var(--cyan); } .under { color: var(--amber); }
+  .W { color: var(--win); } .L { color: var(--loss); } .P, .V { color: var(--muted); }
+  .empty { padding: 14px; color: var(--muted); }
+  details summary { cursor: pointer; color: var(--muted); margin: 28px 0 8px; font-size: 12px;
+                    letter-spacing: .14em; text-transform: uppercase; }
+  .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Threes <span>Engine</span></h1>
+    <div class="meta" id="meta">loading…</div>
+  </header>
+
+  <h2>Forward test</h2>
+  <div class="tiles" id="tiles"></div>
+  <p class="note" id="bar"></p>
+
+  <h2>Tonight's picks</h2>
+  <div class="wrap" id="tonight"></div>
+
+  <h2>Recent graded picks</h2>
+  <div class="wrap" id="recent"></div>
+
+  <h2>Is the model honest?</h2>
+  <div class="wrap" id="calib"></div>
+  <p class="note">Every logged line, picks or not. When the model says 70%, the over should hit about 70% of the time.</p>
+
+  <details>
+    <summary>All of tonight's lines</summary>
+    <div class="wrap" id="alllines"></div>
+  </details>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const fmtPrice = p => (p > 0 ? "+" : "") + p;
+const pct = x => (x * 100).toFixed(1) + "%";
+const dec = p => 1 + (p > 0 ? p / 100 : 100 / Math.abs(p));
+
+async function get(path, fallback) {
+  try { const r = await fetch(path + "?t=" + Date.now()); if (!r.ok) throw 0; return await r.json(); }
+  catch { return fallback; }
+}
+
+function table(cols, rows, empty) {
+  if (!rows.length) return `<div class="empty">${empty}</div>`;
+  return `<table><thead><tr>${cols.map(c => `<th>${c}</th>`).join("")}</tr></thead><tbody>${
+    rows.map(r => `<tr>${r.join("")}</tr>`).join("")}</tbody></table>`;
+}
+const td = (v, cls = "") => `<td class="${cls}">${v}</td>`;
+
+(async () => {
+  const [log, status] = await Promise.all([get("data/log.json", []), get("data/status.json", {})]);
+  const picks = log.filter(e => e.pick);
+  const graded = picks.filter(e => ["W", "L", "P"].includes(e.result));
+  const W = graded.filter(e => e.result === "W").length, L = graded.filter(e => e.result === "L").length,
+        P = graded.filter(e => e.result === "P").length;
+  const units = graded.reduce((s, e) => s + (e.units || 0), 0);
+  const roi = graded.length ? units / graded.length : 0;
+  const bySide = side => {
+    const g = graded.filter(e => e.pick.side === side);
+    const u = g.reduce((s, e) => s + e.units, 0);
+    return g.length ? `${g.filter(e => e.result === "W").length}-${g.filter(e => e.result === "L").length} · ${(u / g.length * 100).toFixed(1)}%` : "—";
+  };
+
+  $("meta").textContent = `model ${status.model || "?"} · edge bar ${pct(status.edge_bar || 0.05)} · last run ${
+    status.last_run ? new Date(status.last_run).toLocaleString() : "never"}${
+    status.credits_remaining ? " · odds credits left " + status.credits_remaining : ""}`;
+
+  $("tiles").innerHTML = [
+    ["Graded picks", graded.length + " / 150"],
+    ["Record", `${W}-${L}${P ? "-" + P : ""}`],
+    ["Units", (units >= 0 ? "+" : "") + units.toFixed(2)],
+    ["ROI", (roi * 100).toFixed(1) + "%"],
+    ["Overs", bySide("over")],
+    ["Unders", bySide("under")],
+  ].map(([k, v]) => `<div class="tile"><small>${k}</small><b${String(v).length > 9 ? ' style="font-size:16px"' : ""}>${v}</b></div>`).join("");
+  $("bar").textContent = "Real money only after 150+ graded picks with ROI of +5% or better, and it has to hold in both halves of the sample.";
+
+  const today = log.length ? log[log.length - 1].date : null;
+  const tonightLines = log.filter(e => e.date === today && !("actual" in e));
+  const tonightPicks = tonightLines.filter(e => e.pick).sort((a, b) => b.pick.edge - a.pick.edge);
+  $("tonight").innerHTML = table(
+    ["Player", "Game", "Bet", "Price", "Book", "Model", "Market", "Edge", "EV", "Proj 3PM"],
+    tonightPicks.map(e => {
+      const side = e.pick.side, best = side === "over" ? e.best_over : e.best_under;
+      const m = side === "over" ? e.p_over : 1 - e.p_over, n = side === "over" ? e.nv_over : 1 - e.nv_over;
+      return [td(e.player), td(e.matchup, "l"), td(`${side} ${e.point}`, side), td(fmtPrice(best.price)),
+              td(best.book, "l"), td(pct(m)), td(pct(n)), td(pct(e.pick.edge)), td(pct(e.pick.ev)), td(e.lam.toFixed(2))];
+    }), today ? "No line clears the bar tonight." : "Nothing logged yet. The first odds pull runs before tip.");
+
+  const recent = graded.slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, 40);
+  $("recent").innerHTML = table(["Date", "Player", "Bet", "Price", "Made", "Result", "Units"],
+    recent.map(e => [td(e.date), td(e.player, "l"), td(`${e.pick.side} ${e.point}`, e.pick.side),
+                     td(fmtPrice(e.pick.price)), td(e.actual), td(e.result, e.result),
+                     td((e.units >= 0 ? "+" : "") + e.units.toFixed(2), e.result)]),
+    "No graded picks yet.");
+
+  const seen = log.filter(e => e.actual !== null && e.actual !== undefined);
+  const buckets = [[0, .3], [.3, .4], [.4, .5], [.5, .6], [.6, .7], [.7, .8], [.8, 1.01]];
+  $("calib").innerHTML = table(["Model says over", "Lines", "Model avg", "Over hit", "Market avg"],
+    buckets.map(([lo, hi]) => {
+      const s = seen.filter(e => e.p_over >= lo && e.p_over < hi);
+      if (!s.length) return null;
+      const avg = k => s.reduce((t, e) => t + e[k], 0) / s.length;
+      const hit = s.filter(e => e.actual > e.point).length / s.length;
+      return [td(`${Math.round(lo * 100)}–${Math.min(100, Math.round(hi * 100))}%`), td(s.length), td(pct(avg("p_over"))),
+              td(pct(hit)), td(pct(avg("nv_over")))];
+    }).filter(Boolean), "Nothing graded yet.");
+
+  $("alllines").innerHTML = table(["Player", "Line", "Model over", "Market over", "Best over", "Best under", "Books"],
+    tonightLines.sort((a, b) => a.player.localeCompare(b.player)).map(e => [
+      td(e.player), td(e.point), td(pct(e.p_over)), td(pct(e.nv_over)),
+      td(`${fmtPrice(e.best_over.price)} ${e.best_over.book}`), td(`${fmtPrice(e.best_under.price)} ${e.best_under.book}`), td(e.books)]),
+    "No lines logged tonight.");
+})();
+</script>
+</body>
+</html>

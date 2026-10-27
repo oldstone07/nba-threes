@@ -1,0 +1,48 @@
+name: daily
+
+# Times are UTC. 11:00 UTC = 7 AM ET (grade last night, no odds credits).
+# 21:45 UTC = 5:45 PM EDT / 4:45 PM EST (pull lines before the 7 PM tips).
+on:
+  schedule:
+    - cron: "0 11 * * *"
+    - cron: "45 21 * * *"
+  workflow_dispatch:
+    inputs:
+      odds:
+        description: "Pull tonight's odds too"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tests
+        run: python -m unittest discover tests
+      - name: Engine
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: |
+          if [ "${{ github.event.schedule }}" = "45 21 * * *" ] || [ "${{ inputs.odds }}" = "true" ]; then
+            python engine.py run --odds
+          else
+            python engine.py run
+          fi
+      - name: Commit data
+        run: |
+          git config user.name "threes-engine"
+          git config user.email "threes-engine@users.noreply.github.com"
+          git add data
+          git diff --cached --quiet || git commit -m "data: $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push
