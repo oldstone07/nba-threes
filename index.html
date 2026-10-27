@@ -106,8 +106,12 @@
 </main>
 <script>
 // ===================================================================== locked rules
-// Same rules as engine.py v1. Change MODEL_VERSION if you touch any of them.
-const MODEL_VERSION = "v1";
+// engine.py v1 rules, plus v2: Tim's books only, and one pick per player per game.
+// Change MODEL_VERSION if you touch any of them.
+const MODEL_VERSION = "v2";
+// Books Tim can bet in Ohio, as Odds API keys. bet365 isn't on the Odds API (US).
+// williamhill_us = Caesars (paid Odds API plans only); espnbet = theScore Bet.
+const BOOKS = ["draftkings", "fanduel", "betmgm", "williamhill_us", "espnbet"];
 const EDGE_BAR = 0.05;          // model prob minus no-vig book prob, on the side we'd bet
 const LEAGUE_PCT = 0.36;        // 3P% everyone regresses toward
 const PRIOR_ATT = 100;          // 3P% regression strength, in attempts
@@ -213,6 +217,13 @@ function choosePick(point, lam, market) {
   }
   return [pOver, best];
 }
+// v2: lines on the same player (over 0.5 and over 1.5) are one opinion, so only the
+// biggest-edge pick per player per game counts. The rest are logged with pick = null.
+function onePickPerPlayer(rows) {
+  const best = {};
+  for (const e of rows) if (e.pick && (!best[e.pkey] || e.pick.edge > best[e.pkey].pick.edge)) best[e.pkey] = e;
+  for (const e of rows) if (e.pick && best[e.pkey] !== e) { e.pick_dropped = e.pick; e.pick = null; }
+}
 function gradeEntry(e, box) {
   const p = box.players.find(x => x.key === e.pkey);
   if (!p || !p.played) { Object.assign(e, { actual: null, result: "V", units: 0 }); return; }
@@ -256,6 +267,13 @@ function selfTest() {
   ok(g(2).result === "W" && g(2).units === 1.05, "grade W"); ok(g(1).result === "L" && g(1).units === -1, "grade L");
   ok(g(null).result === "V", "grade void");
   ok(choosePick(1.5, 1.68, evaluateLine({ dk: { over: -110, under: -110 } }))[1] === null, "no pick when close");
+  const dup = [{ pkey: "a", pick: { edge: 0.06 } }, { pkey: "a", pick: { edge: 0.11 } }, { pkey: "b", pick: { edge: 0.07 } }, { pkey: "b", pick: null }];
+  onePickPerPlayer(dup);
+  ok(dup[0].pick === null && dup[0].pick_dropped && dup[1].pick.edge === 0.11 && dup[2].pick.edge === 0.07, "one pick per player");
+  const parsed = parseOddsEvent({ bookmakers: [
+    { key: "draftkings", markets: [{ key: "player_threes", outcomes: [{ name: "Over", description: "A B", point: 1.5, price: 120 }, { name: "Under", description: "A B", point: 1.5, price: -150 }] }] },
+    { key: "bovada", markets: [{ key: "player_threes", outcomes: [{ name: "Over", description: "A B", point: 1.5, price: 200 }] }] }] });
+  ok(Object.keys(parsed["A B|1.5"].books).join() === "draftkings", "only Tim's books");
   return fails;
 }
 
@@ -405,6 +423,9 @@ function logLines(list, game, lines, source) {
     });
     byId.set(id, e); logged++;
   }
+  const gameRows = [...byId.values()].filter(e => e.gameId === game.gameId && e.model === MODEL_VERSION);
+  onePickPerPlayer(gameRows);
+  for (const e of gameRows) if (e.first_logged === now) e.first.pick = e.pick;
   const out = [...byId.values()].sort((a, b) => (a.date + a.gameId + a.player + a.point).localeCompare(b.date + b.gameId + b.player + b.point));
   list.length = 0; list.push(...out);
   return logged;
@@ -421,12 +442,15 @@ async function pullOfficial(game) {
   const ev = evs.find(x => sameTeam(x.home_team, game.home.name) && sameTeam(x.away_team, game.away.name));
   if (!ev) throw new Error(`no Odds API event for ${game.away.tri} @ ${game.home.tri}`);
   const [data, hdr] = await getJSON(`${ODDS}/events/${ev.id}/odds?apiKey=${encodeURIComponent(S.keys.odds)}` +
-                                    `&regions=us&markets=player_threes&oddsFormat=american`);
+                                    `&bookmakers=${BOOKS.join(",")}&markets=player_threes&oddsFormat=american`);
   const rem = hdr.get("x-requests-remaining"), used = hdr.get("x-requests-used");
   if (rem != null) Object.assign(S.status, { credits_remaining: rem, credits_used: used });
+  return logLines(S.log, game, parseOddsEvent(data), "official");
+}
+function parseOddsEvent(data) {
   const lines = {};
   for (const bm of data.bookmakers || []) for (const mk of bm.markets || []) {
-    if (mk.key !== "player_threes") continue;
+    if (mk.key !== "player_threes" || !BOOKS.includes(bm.key)) continue;
     for (const o of mk.outcomes) {
       const side = o.name.toLowerCase();
       if ((side !== "over" && side !== "under") || o.point == null) continue;
@@ -435,7 +459,7 @@ async function pullOfficial(game) {
       (lines[k].books[bm.key] ||= {})[side] = o.price;
     }
   }
-  return logLines(S.log, game, lines, "official");
+  return lines;
 }
 
 // ===================================================================== free pull (SharpAPI, DK + FD)
@@ -459,7 +483,7 @@ async function pullFree(game) {
   const lines = {};
   for (const r of rows) {
     const side = r.selection_type;
-    if ((side !== "over" && side !== "under") || r.line == null || !r.player_name) continue;
+    if ((side !== "over" && side !== "under") || r.line == null || !r.player_name || !BOOKS.includes(r.sportsbook)) continue;
     const k = `${r.player_name}|${r.line}`;
     (lines[k] ||= { player: r.player_name, point: +r.line, books: {} });
     (lines[k].books[r.sportsbook] ||= {})[side] = r.odds_american;
@@ -536,7 +560,8 @@ function sideRec(graded, side) {
 }
 
 function renderGame(g) {
-  const off = S.log.filter(e => e.gameId === g.gameId), fr = S.free.filter(e => e.gameId === g.gameId);
+  const cur = e => e.gameId === g.gameId && e.model === MODEL_VERSION;  // older-version rows stay in the log, off the board
+  const off = S.log.filter(cur), fr = S.free.filter(cur);
   const when = list => list.length ? etTime(list.reduce((m, e) => e.last_logged > m ? e.last_logged : m, "")) : null;
   const done = started(g);
   const picks = [...off.filter(e => e.pick).map(e => ({ e, src: "o" })), ...fr.filter(e => e.pick).map(e => ({ e, src: "f" }))]

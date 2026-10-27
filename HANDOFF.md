@@ -8,7 +8,11 @@ Started 2026-10-27. A Strikeout-Engine-style page for NBA made-threes props. Tim
 - Repo: https://github.com/oldstone07/nba-threes (public). Page: https://oldstone07.github.io/nba-threes/
 - **Verified 27 Oct, local server:** the self-test passes; ESPN sync loaded 52 box scores from opening night (20 Oct); a free pull on real SharpAPI lines logged 41 lines across 4 games with 0 unmatched names; 5 of those lines were re-run through `engine.py` and matched exactly (lam, p_over, no-vig, pick). The official pull was tested with a mock Odds API response only: parsing, re-pull updates the same row, unmatched names get reported, credits are read, grading is right.
 - **Not yet verified:** a real official pull with Tim's Odds API key. On the first one, check that `odds credits left` appears in the header. It reads the `x-requests-remaining` header; if the Odds API doesn't expose it to browsers, the page just won't show it.
-- **Next:** Tim opens the page, adds both keys under Settings (Odds API = official; SharpAPI = free. The SharpAPI key is the one in `Engines/Promo EV/key.txt`), then pulls.
+- **27 Oct, model v2** (after Tim's first real official pull worked: 18 lines on BKN @ BOS, credits read fine). Two rule changes:
+  - **Tim's books only:** DraftKings, FanDuel, BetMGM, Caesars (`williamhill_us`, paid Odds API plans only) and theScore (`espnbet`). The request uses `bookmakers=` (5 books = 1 region = 1 credit). bet365 isn't on the Odds API for the US. The first pull had priced picks at Bovada (offshore) and BetRivers.
+  - **One pick per player per game:** the biggest edge counts; the others keep `pick_dropped` and `pick = null`.
+  - The forward test counts v2 only. v1 rows stay in the log but are hidden from the game board.
+- **Next (was):** Tim opens the page, adds both keys under Settings (Odds API = official; SharpAPI = free. The SharpAPI key is the one in `Engines/Promo EV/key.txt`), then pulls.
 
 ## Using it
 
@@ -26,7 +30,7 @@ Started 2026-10-27. A Strikeout-Engine-style page for NBA made-threes props. Tim
 - **NBA data:** ESPN `site.api.espn.com` scoreboard (one call per day from `SEASON_START`; finished days are cached) and `summary?event=` box scores (cached slim). cdn.nba.com is blocked for browsers (CORS) and returned 403 to a plain curl, so ESPN replaced it. Players are matched by normalised name (`normName`), not ID.
 - **Prior:** `data/prior.json` (2025-26 per-player 3PA/3PM), re-keyed by normalised name on load.
 - **Projection (v1):** attempts = half last-10 average, half season average (last season counts as 10 games of history); 3P% regressed toward 36% with a 100-attempt prior seeded from last season; made threes follow a negative binomial (size 12) instead of Poisson.
-- **Pick rule (locked):** bet a side only when model probability minus the no-vig market probability is at least 5 points **and** the bet is +EV at the best available price. Over or under.
+- **Pick rule (locked, v2):** bet a side only when model probability minus the no-vig market probability is at least 5 points **and** the bet is +EV at the best available price among Tim's books (`BOOKS`). Over or under. At most one pick per player per game (biggest edge). `engine.py` is still v1 (all US books, no per-player limit).
 - **Log:** every line, picks or not, so calibration can be checked on everything. Every book's prices are kept on the row (`prices`).
 - **Grading:** automatic once ESPN has the box score. Player didn't play → void. Flat 1 unit at the best price.
 - **Self-test:** the assertions from `tests/test_engine.py` run on every page load. If any fails, a red banner shows and the pull buttons are disabled.
