@@ -7,7 +7,7 @@
 <style>
   :root {
     --bg: #0b0d10; --panel: #12161b; --rule: #222932; --ink: #d8dee6; --muted: #7c8794;
-    --cyan: #36c5d8; --amber: #e6a94a; --win: #4fbf7a; --loss: #e06666;
+    --cyan: #36c5d8; --amber: #e6a94a; --win: #4fbf7a; --loss: #e06666; --free: #a58bd9;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
@@ -36,6 +36,28 @@
   details summary { cursor: pointer; color: var(--muted); margin: 28px 0 8px; font-size: 12px;
                     letter-spacing: .14em; text-transform: uppercase; }
   .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  button { font: 12px var(--mono); color: var(--ink); background: var(--panel); border: 1px solid var(--rule);
+           padding: 6px 10px; cursor: pointer; letter-spacing: .04em; }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: .4; cursor: default; }
+  button.off { border-color: var(--cyan); color: var(--cyan); }
+  button.fr { border-color: var(--free); color: var(--free); }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+  #status { color: var(--muted); font-size: 12px; min-height: 18px; margin: 6px 0 0; }
+  #status.bad { color: var(--loss); }
+  .banner { border: 1px solid var(--loss); color: var(--loss); padding: 10px 12px; margin-top: 14px; display: none; }
+  .game { border: 1px solid var(--rule); background: var(--panel); margin-bottom: 8px; }
+  .ghead { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 10px; }
+  .ghead .m { font-weight: 600; min-width: 110px; }
+  .ghead .t { color: var(--muted); font-size: 12px; flex: 1; min-width: 160px; }
+  .ghead .t i { font-style: normal; }
+  .gbody { border-top: 1px solid var(--rule); }
+  .gbody table { font-size: 12px; }
+  .tag { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; padding: 1px 5px; border: 1px solid; }
+  .tag.o { color: var(--cyan); } .tag.f { color: var(--free); }
+  .set-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 10px; border-bottom: 1px solid var(--rule); }
+  .set-row:last-child { border-bottom: 0; }
+  .ok { color: var(--win); } .no { color: var(--loss); }
 </style>
 </head>
 <body>
@@ -44,108 +66,611 @@
     <h1>Threes <span>Engine</span></h1>
     <div class="meta" id="meta">loading…</div>
   </header>
+  <div class="banner" id="banner"></div>
 
-  <h2>Forward test</h2>
+  <h2>Forward test <span style="text-transform:none;letter-spacing:0">(official pulls only)</span></h2>
   <div class="tiles" id="tiles"></div>
   <p class="note" id="bar"></p>
 
-  <h2>Tonight's picks</h2>
-  <div class="wrap" id="tonight"></div>
+  <h2>Tonight</h2>
+  <div class="bar">
+    <button class="off" id="pullAll" title="Odds API, about 1 credit per game. Logs the bet of record.">⬡ Pull all (official)</button>
+    <button class="fr" id="freeAll" title="SharpAPI, free. DraftKings + FanDuel only. Saved separately; never counts toward the forward test.">◇ Free pull all</button>
+    <button id="sync" title="Re-check ESPN for finished games and grade.">↻ Sync results</button>
+  </div>
+  <div id="games"></div>
+  <p id="status"></p>
 
   <h2>Recent graded picks</h2>
   <div class="wrap" id="recent"></div>
 
   <h2>Is the model honest?</h2>
   <div class="wrap" id="calib"></div>
-  <p class="note">Every logged line, picks or not. When the model says 70%, the over should hit about 70% of the time.</p>
+  <p class="note">Every official line, picks or not. When the model says 70%, the over should hit about 70% of the time.</p>
 
-  <details>
-    <summary>All of tonight's lines</summary>
-    <div class="wrap" id="alllines"></div>
-  </details>
+  <h2>Free-line picks <span style="text-transform:none;letter-spacing:0">(DK/FD only, for comparison)</span></h2>
+  <div class="tiles" id="freetiles"></div>
+
+  <h2>Settings</h2>
+  <div class="wrap" id="settings">
+    <div class="set-row"><button id="setOdds">Change Odds API key</button><span id="oddsState" class="meta"></span>
+      <span class="meta">Official pulls — the-odds-api.com.</span></div>
+    <div class="set-row"><button id="setSharp">Change SharpAPI key</button><span id="sharpState" class="meta"></span>
+      <span class="meta">Free DK/FD lines — sharpapi.io.</span></div>
+    <div class="set-row"><button id="backup">Download backup</button><button id="restoreBtn">Restore backup…</button>
+      <input type="file" id="restore" accept="application/json" style="display:none">
+      <span class="meta" id="backupState"></span></div>
+  </div>
+  <p class="note">Everything (keys, box scores, the log) stays in this browser. Download a backup now and then; clearing site data wipes it.</p>
+  <p class="note" id="unmatched"></p>
 </main>
 <script>
+// ===================================================================== locked rules
+// Same rules as engine.py v1. Change MODEL_VERSION if you touch any of them.
+const MODEL_VERSION = "v1";
+const EDGE_BAR = 0.05;          // model prob minus no-vig book prob, on the side we'd bet
+const LEAGUE_PCT = 0.36;        // 3P% everyone regresses toward
+const PRIOR_ATT = 100;          // 3P% regression strength, in attempts
+const PRIOR_GAMES = 10;         // weight of last season's 3PA/game, in games
+const MIN_GAMES_NO_PRIOR = 5;   // players with no last-season data need this many games
+const LAST_N = 10;              // recent-form window
+const DISPERSION = 12;          // negative-binomial size; fit on 2024-25, checked on 2025-26
+const SEASON_START = "2026-10-20";  // 2026-27 opening night
+
+const ESPN = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba";
+const ODDS = "https://api.the-odds-api.com/v4/sports/basketball_nba";
+const SHARP = "https://api.sharpapi.io/api/v1";
+
+// ===================================================================== math
+function lgamma(x) {  // Lanczos, g=7
+  const c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313,
+    -176.61502916214059, 12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
+  if (x < 0.5) return Math.log(Math.PI / Math.abs(Math.sin(Math.PI * x))) - lgamma(1 - x);
+  x -= 1;
+  let a = c[0];
+  const t = x + 7.5;
+  for (let i = 1; i < 9; i++) a += c[i] / (x + i);
+  return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(t) - t + Math.log(a);
+}
+function poisGe(k, lam) {
+  if (k <= 0) return 1;
+  let term = Math.exp(-lam), total = 0;
+  for (let i = 0; i < k; i++) { if (i) term *= lam / i; total += term; }
+  return Math.max(0, 1 - total);
+}
+function nbEq(k, mu, r = DISPERSION) {
+  if (mu <= 0) return k === 0 ? 1 : 0;
+  const p = r / (r + mu);
+  return Math.exp(lgamma(k + r) - lgamma(r) - lgamma(k + 1) + r * Math.log(p) + k * Math.log(1 - p));
+}
+function nbGe(k, mu, r = DISPERSION) {
+  let s = 0;
+  for (let i = 0; i < Math.max(k, 0); i++) s += nbEq(i, mu, r);
+  return Math.max(0, 1 - s);
+}
+function overUnderProbs(point, lam) {  // [p_over, p_under, p_push]
+  if (Number.isInteger(point)) {
+    const pPush = nbEq(point, lam), pOver = nbGe(point + 1, lam);
+    return [pOver, 1 - pOver - pPush, pPush];
+  }
+  const pOver = nbGe(Math.floor(point) + 1, lam);
+  return [pOver, 1 - pOver, 0];
+}
+const amDec = p => 1 + (p > 0 ? p / 100 : 100 / Math.abs(p));
+const implied = p => 1 / amDec(p);
+function noVig(o, u) { const io = implied(o), iu = implied(u); return io / (io + iu); }
+
+// ===================================================================== names
+const SUFFIXES = new Set(["jr", "sr", "ii", "iii", "iv", "v"]);
+function normName(name) {
+  let s = String(name).normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^\x00-\x7f]/g, "").toLowerCase();
+  s = s.replace(/'/g, "").replace(/\./g, "").replace(/[^a-z ]/g, " ");
+  return s.split(/\s+/).filter(p => p && !SUFFIXES.has(p)).join(" ");
+}
+// Odds feeds say "Los Angeles Clippers"; ESPN's team.name is "Clippers".
+const sameTeam = (feedTeam, teamName) => normName(feedTeam).endsWith(normName(teamName));
+
+// ===================================================================== model
+function project(games, prior) {
+  // games: [[date, fg3a, fg3m]] played games before tonight. prior: {g,a,m} last season, or null.
+  const n = games.length;
+  if (!prior && n < MIN_GAMES_NO_PRIOR) return null;
+  const sumA = games.reduce((s, g) => s + g[1], 0), sumM = games.reduce((s, g) => s + g[2], 0);
+  let priorApg = 0, k = 0, priorPct = LEAGUE_PCT;
+  if (prior && prior.g > 0) {
+    priorApg = prior.a / prior.g; k = PRIOR_GAMES;
+    priorPct = (prior.m + LEAGUE_PCT * PRIOR_ATT) / (prior.a + PRIOR_ATT);
+  }
+  const seasonApg = (priorApg * k + sumA) / (k + n);
+  let recentApg = seasonApg;
+  if (n >= 5) { const rec = games.slice(-LAST_N); recentApg = rec.reduce((s, g) => s + g[1], 0) / rec.length; }
+  const att = 0.5 * recentApg + 0.5 * seasonApg;
+  const pct = (sumM + priorPct * PRIOR_ATT) / (sumA + PRIOR_ATT);
+  return { lam: att * pct, att, pct, n };
+}
+function evaluateLine(books) {  // books: {book: {over, under}}
+  const pairs = Object.values(books).filter(p => p.over != null && p.under != null);
+  if (!pairs.length) return null;
+  const nvOver = pairs.reduce((s, p) => s + noVig(p.over, p.under), 0) / pairs.length;
+  const best = side => {
+    let b = null;
+    for (const [book, p] of Object.entries(books))
+      if (p[side] != null && (!b || amDec(p[side]) > amDec(b.price))) b = { price: p[side], book };
+    return b;
+  };
+  return { nv_over: nvOver, books: pairs.length, best_over: best("over"), best_under: best("under") };
+}
+function choosePick(point, lam, market) {
+  const [pOver, , pPush] = overUnderProbs(point, lam);
+  const live = 1 - pPush, mOver = live > 0 ? pOver / live : 0.5;  // no-push basis
+  let best = null;
+  for (const [side, m, nv, bp] of [["over", mOver, market.nv_over, market.best_over],
+                                   ["under", 1 - mOver, 1 - market.nv_over, market.best_under]]) {
+    if (!bp) continue;
+    const edge = m - nv, ev = m * amDec(bp.price) - 1;
+    if (edge >= EDGE_BAR && ev > 0 && (!best || edge > best.edge))
+      best = { side, edge: +edge.toFixed(4), ev: +ev.toFixed(4), price: bp.price, book: bp.book };
+  }
+  return [pOver, best];
+}
+function gradeEntry(e, box) {
+  const p = box.players.find(x => x.key === e.pkey);
+  if (!p || !p.played) { Object.assign(e, { actual: null, result: "V", units: 0 }); return; }
+  e.actual = p.fg3m;
+  if (!e.pick) { e.result = null; return; }
+  const res = p.fg3m === e.point ? "P" : ((p.fg3m > e.point) === (e.pick.side === "over") ? "W" : "L");
+  e.result = res;
+  e.units = { W: +(amDec(e.pick.price) - 1).toFixed(4), L: -1, P: 0 }[res];
+}
+
+// ===================================================================== self-test
+// Ported from tests/test_engine.py. A broken projection blocks pulls instead of logging bad picks.
+function selfTest() {
+  const fails = [];
+  const near = (a, b, tol, what) => { if (!(Math.abs(a - b) <= tol)) fails.push(`${what}: ${a} vs ${b}`); };
+  const ok = (c, what) => { if (!c) fails.push(what); };
+  near(poisGe(2, 2), 1 - 3 * Math.exp(-2), 1e-12, "poisson");
+  ok(poisGe(0, 1.3) === 1, "poisson k=0");
+  let s = 0, m = 0; for (let k = 0; k < 200; k++) { s += nbEq(k, 2); m += k * nbEq(k, 2); }
+  near(s, 1, 1e-9, "nb sums to 1"); near(m, 2, 1e-6, "nb mean");
+  ok(nbEq(0, 2) > Math.exp(-2), "nb wider than poisson");
+  near(nbGe(2, 2, 1e7), poisGe(2, 2), 1e-5, "nb -> poisson");
+  const [po, pu, pp] = overUnderProbs(2, 2); near(po + pu + pp, 1, 1e-12, "o/u/push sum"); near(pp, nbEq(2, 2), 1e-12, "push");
+  ok(JSON.stringify(overUnderProbs(1.5, 0)) === "[0,1,0]", "lam 0");
+  near(amDec(-200), 1.5, 1e-12, "dec -200"); near(amDec(150), 2.5, 1e-12, "dec +150"); near(noVig(-110, -110), 0.5, 1e-12, "no-vig");
+  ok(normName("Luka Dončić") === "luka doncic", "name accents");
+  ok(normName("Jaren Jackson Jr.") === "jaren jackson", "name suffix");
+  ok(normName("De'Aaron Fox") === "deaaron fox", "name apostrophe");
+  ok(sameTeam("Los Angeles Clippers", "Clippers") && sameTeam("Portland Trail Blazers", "Trail Blazers")
+     && !sameTeam("Los Angeles Lakers", "Clippers") && sameTeam("Philadelphia 76ers", "76ers"), "team match");
+  ok(project(Array(4).fill(["2026-10-21", 5, 2]), null) === null, "no prior needs 5 games");
+  const games = [21, 22, 23, 24, 25, 26].map(d => [`2026-10-${d}`, 6, 2]);
+  const r = project(games, { g: 80, a: 480, m: 180 });
+  const prPct = (180 + 0.36 * 100) / (480 + 100), pct = (12 + prPct * 100) / (36 + 100);
+  near(r.att, 6, 1e-12, "proj att"); near(r.pct, pct, 1e-12, "proj pct"); near(r.lam, 6 * pct, 1e-12, "proj lam");
+  const mk = evaluateLine({ dk: { over: -110, under: -110 }, fd: { over: 105, under: -135 } });
+  ok(mk.books === 2 && mk.best_over.price === 105 && mk.best_over.book === "fd" && mk.best_under.price === -110, "market");
+  const [, pick] = choosePick(1.5, 3.0, mk);
+  ok(pick && pick.side === "over" && pick.price === 105, "pick over");
+  const g = fg3m => { const e = { pkey: "x", point: 1.5, pick }; gradeEntry(e, { players: [{ key: "x", played: fg3m != null, fg3m: fg3m || 0 }] }); return e; };
+  ok(g(2).result === "W" && g(2).units === 1.05, "grade W"); ok(g(1).result === "L" && g(1).units === -1, "grade L");
+  ok(g(null).result === "V", "grade void");
+  ok(choosePick(1.5, 1.68, evaluateLine({ dk: { over: -110, under: -110 } }))[1] === null, "no pick when close");
+  return fails;
+}
+
+// ===================================================================== storage (IndexedDB)
+const DB = { db: null };
+DB.open = () => new Promise((res, rej) => {
+  const q = indexedDB.open("nba-threes", 1);
+  q.onupgradeneeded = () => q.result.createObjectStore("kv");
+  q.onsuccess = () => { DB.db = q.result; res(); };
+  q.onerror = () => rej(q.error);
+});
+DB.get = k => new Promise((res, rej) => {
+  const q = DB.db.transaction("kv").objectStore("kv").get(k);
+  q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+});
+DB.set = (k, v) => new Promise((res, rej) => {
+  const t = DB.db.transaction("kv", "readwrite"); t.objectStore("kv").put(v, k);
+  t.oncomplete = () => res(); t.onerror = () => rej(t.error);
+});
+
+// state: keys {odds, sharp}; days {date: {done, games:[...]}}; boxes {gameId: slim}; log [...]; free [...]; status {}
+const S = { keys: {}, days: {}, boxes: {}, log: [], free: [], status: {}, prior: {}, unmatched: [] };
+async function loadState() {
+  for (const k of ["keys", "days", "boxes", "log", "free", "status"]) S[k] = (await DB.get(k)) ?? S[k];
+}
+const save = (...ks) => Promise.all(ks.map(k => DB.set(k, S[k])));
+
+// ===================================================================== helpers
 const $ = id => document.getElementById(id);
 const fmtPrice = p => (p > 0 ? "+" : "") + p;
 const pct = x => (x * 100).toFixed(1) + "%";
-const dec = p => 1 + (p > 0 ? p / 100 : 100 / Math.abs(p));
-
-async function get(path, fallback) {
-  try { const r = await fetch(path + "?t=" + Date.now()); if (!r.ok) throw 0; return await r.json(); }
-  catch { return fallback; }
-}
-
+const etDate = d => new Date(d).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+const etTime = d => new Date(d).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" });
+const todayET = () => etDate(Date.now());
+const ymd = d => d.replaceAll("-", "");
+function addDays(d, n) { const t = new Date(d + "T12:00:00Z"); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); }
+function setStatus(msg, bad) { $("status").textContent = msg; $("status").className = bad ? "bad" : ""; }
+const td = (v, cls = "") => `<td class="${cls}">${v}</td>`;
 function table(cols, rows, empty) {
   if (!rows.length) return `<div class="empty">${empty}</div>`;
   return `<table><thead><tr>${cols.map(c => `<th>${c}</th>`).join("")}</tr></thead><tbody>${
     rows.map(r => `<tr>${r.join("")}</tr>`).join("")}</tbody></table>`;
 }
-const td = (v, cls = "") => `<td class="${cls}">${v}</td>`;
+async function getJSON(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) {
+    const body = (await r.text()).slice(0, 160);
+    throw new Error(`${r.status} ${body}`);
+  }
+  return [await r.json(), r.headers];
+}
 
-(async () => {
-  const [log, status] = await Promise.all([get("data/log.json", []), get("data/status.json", {})]);
-  const picks = log.filter(e => e.pick);
-  const graded = picks.filter(e => ["W", "L", "P"].includes(e.result));
+// ===================================================================== ESPN: schedule + box scores
+function parseDay(sb) {
+  return (sb.events || []).filter(e => e.season?.type === 2).map(e => {
+    const c = e.competitions[0], side = ha => c.competitors.find(x => x.homeAway === ha).team;
+    const h = side("home"), a = side("away");
+    return { gameId: e.id, tip: e.date, date: etDate(e.date), state: e.status.type.state,
+             final: !!e.status.type.completed,
+             home: { tri: h.abbreviation, name: h.name }, away: { tri: a.abbreviation, name: a.name } };
+  });
+}
+function slimBox(summary, game) {
+  const players = [];
+  for (const t of summary.boxscore?.players || []) {
+    const st = t.statistics?.[0]; if (!st) continue;
+    const iMin = st.names.indexOf("MIN"), i3 = st.names.indexOf("3PT");
+    for (const a of st.athletes || []) {
+      const mins = parseFloat(a.stats?.[iMin]) || 0;
+      const [m3, a3] = (a.stats?.[i3] || "0-0").split("-").map(Number);
+      players.push({ key: normName(a.athlete.displayName), name: a.athlete.displayName, team: t.team.abbreviation,
+                     played: !a.didNotPlay && mins > 0, min: mins, fg3a: a3 || 0, fg3m: m3 || 0 });
+    }
+  }
+  return { gameId: game.gameId, date: game.date, players };
+}
+async function syncDays() {
+  const today = todayET();
+  for (let d = SEASON_START; d <= today; d = addDays(d, 1)) {
+    const cached = S.days[d];
+    if (cached && cached.done) continue;
+    const [sb] = await getJSON(`${ESPN}/scoreboard?dates=${ymd(d)}`);
+    const games = parseDay(sb);
+    S.days[d] = { done: d < today && games.every(g => g.final), games };
+  }
+  await save("days");
+}
+async function syncBoxes() {
+  const need = Object.values(S.days).flatMap(d => d.games).filter(g => g.final && !S.boxes[g.gameId]);
+  let added = 0;
+  for (const g of need) {
+    setStatus(`Loading box scores… ${added + 1}/${need.length}`);
+    try {
+      const [sum] = await getJSON(`${ESPN}/summary?event=${g.gameId}`);
+      const box = slimBox(sum, g);
+      if (box.players.length) { S.boxes[g.gameId] = box; added++; }
+    } catch (e) { console.warn("box", g.gameId, e.message); }
+  }
+  if (added) await save("boxes");
+  return added;
+}
+function history() {  // {pkey: [[date, a, m]]} played games, oldest first; plus name index
+  const hist = {}, names = {};
+  for (const box of Object.values(S.boxes)) for (const p of box.players) {
+    names[p.key] = { name: p.name, team: p.team };
+    if (p.played) (hist[p.key] ||= []).push([box.date, p.fg3a, p.fg3m]);
+  }
+  for (const v of Object.values(hist)) v.sort((a, b) => a[0].localeCompare(b[0]));
+  return { hist, names };
+}
+function gradeAll() {
+  let n = 0;
+  for (const list of [S.log, S.free]) for (const e of list) {
+    if ("actual" in e) continue;
+    const box = S.boxes[e.gameId];
+    if (box) { gradeEntry(e, box); n++; }
+  }
+  return n;
+}
+
+// ===================================================================== logging (shared by official + free)
+// lines: {"player|point": {player, point, books: {book: {over, under}}}}
+function logLines(list, game, lines, source) {
+  const { hist, names } = history();
+  const byId = new Map(list.map(e => [e.id, e]));
+  const now = new Date().toISOString();
+  let logged = 0;
+  for (const { player, point, books } of Object.values(lines)) {
+    const key = normName(player);
+    const pr = S.prior[key] || null;
+    if (!names[key] && !pr) { S.unmatched.push(player); continue; }
+    const past = (hist[key] || []).filter(g => g[0] < game.date);
+    const proj = project(past, pr);
+    const market = evaluateLine(books);
+    if (!proj || !market) continue;
+    const [pOver, pick] = choosePick(point, proj.lam, market);
+    const id = `${game.date}|${game.gameId}|${key}|${point}`;
+    const e = byId.get(id) || { id, first_logged: now, pulls: 0,
+                                first: { nv_over: +market.nv_over.toFixed(4), best_over: market.best_over, best_under: market.best_under, pick } };
+    Object.assign(e, {
+      source, date: game.date, gameId: game.gameId, tip: game.tip, matchup: `${game.away.tri} @ ${game.home.tri}`,
+      player: names[key]?.name || pr?.name || player, pkey: key, team: names[key]?.team || "",
+      point, lam: +proj.lam.toFixed(3), att: +proj.att.toFixed(2), pct: +proj.pct.toFixed(3), games: proj.n,
+      p_over: +pOver.toFixed(4), nv_over: +market.nv_over.toFixed(4), books: market.books, prices: books,
+      best_over: market.best_over, best_under: market.best_under, pick, model: MODEL_VERSION,
+      last_logged: now, pulls: e.pulls + 1,
+    });
+    byId.set(id, e); logged++;
+  }
+  const out = [...byId.values()].sort((a, b) => (a.date + a.gameId + a.player + a.point).localeCompare(b.date + b.gameId + b.player + b.point));
+  list.length = 0; list.push(...out);
+  return logged;
+}
+
+// ===================================================================== official pull (Odds API)
+let oddsEvents = null;
+async function oddsEventsList() {
+  if (!oddsEvents) [oddsEvents] = await getJSON(`${ODDS}/events?apiKey=${encodeURIComponent(S.keys.odds)}`);  // free, no credits
+  return oddsEvents;
+}
+async function pullOfficial(game) {
+  const evs = await oddsEventsList();
+  const ev = evs.find(x => sameTeam(x.home_team, game.home.name) && sameTeam(x.away_team, game.away.name));
+  if (!ev) throw new Error(`no Odds API event for ${game.away.tri} @ ${game.home.tri}`);
+  const [data, hdr] = await getJSON(`${ODDS}/events/${ev.id}/odds?apiKey=${encodeURIComponent(S.keys.odds)}` +
+                                    `&regions=us&markets=player_threes&oddsFormat=american`);
+  const rem = hdr.get("x-requests-remaining"), used = hdr.get("x-requests-used");
+  if (rem != null) Object.assign(S.status, { credits_remaining: rem, credits_used: used });
+  const lines = {};
+  for (const bm of data.bookmakers || []) for (const mk of bm.markets || []) {
+    if (mk.key !== "player_threes") continue;
+    for (const o of mk.outcomes) {
+      const side = o.name.toLowerCase();
+      if ((side !== "over" && side !== "under") || o.point == null) continue;
+      const k = `${o.description}|${o.point}`;
+      (lines[k] ||= { player: o.description, point: +o.point, books: {} });
+      (lines[k].books[bm.key] ||= {})[side] = o.price;
+    }
+  }
+  return logLines(S.log, game, lines, "official");
+}
+
+// ===================================================================== free pull (SharpAPI, DK + FD)
+let sharpCache = null;  // one fetch covers the whole slate; reused for 60s
+async function sharpRows() {
+  if (sharpCache && Date.now() - sharpCache.at < 60000) return sharpCache.rows;
+  let rows = [], offset = 0;
+  for (let i = 0; i < 3; i++) {  // offset caps at 500 on SharpAPI
+    const [j] = await getJSON(`${SHARP}/odds?league=nba&market=player_made_threes&is_main_line=true&limit=200&offset=${offset}`,
+                              { headers: { "X-API-Key": S.keys.sharp } });
+    rows = rows.concat(j.data || []);
+    if (!j.pagination?.has_more) break;
+    offset = j.pagination.next_offset;
+  }
+  sharpCache = { at: Date.now(), rows };
+  return rows;
+}
+async function pullFree(game) {
+  const rows = (await sharpRows()).filter(r => sameTeam(r.home_team, game.home.name) && sameTeam(r.away_team, game.away.name)
+                                             && etDate(r.event_start_time) === game.date);
+  const lines = {};
+  for (const r of rows) {
+    const side = r.selection_type;
+    if ((side !== "over" && side !== "under") || r.line == null || !r.player_name) continue;
+    const k = `${r.player_name}|${r.line}`;
+    (lines[k] ||= { player: r.player_name, point: +r.line, books: {} });
+    (lines[k].books[r.sportsbook] ||= {})[side] = r.odds_american;
+  }
+  return logLines(S.free, game, lines, "free");
+}
+
+// ===================================================================== actions
+let testsOK = false, busy = false;
+const started = g => new Date(g.tip) <= new Date();
+function tonight() { return (S.days[todayET()]?.games || []).slice().sort((a, b) => a.tip.localeCompare(b.tip)); }
+
+async function run(label, fn) {
+  if (busy) return;
+  busy = true; render();
+  try { await fn(); }
+  catch (e) { setStatus(`${label} failed: ${e.message}`, true); console.error(e); }
+  finally { busy = false; render(); }
+}
+function needKey(which) {
+  if (S.keys[which]) return true;
+  setStatus(`Add your ${which === "odds" ? "Odds API" : "SharpAPI"} key under Settings first.`, true);
+  return false;
+}
+async function doPull(games, source) {
+  if (!testsOK) return setStatus("Self-test failed — pulls are blocked.", true);
+  if (!needKey(source === "official" ? "odds" : "sharp")) return;
+  const todo = games.filter(g => !started(g));
+  if (!todo.length) return setStatus("Every game has already tipped.");
+  if (source === "official" && todo.length > 1 &&
+      !confirm(`Official pull for ${todo.length} game(s)? About ${todo.length} Odds API credits.`)) return;
+  await run(source === "official" ? "Official pull" : "Free pull", async () => {
+    S.unmatched = []; oddsEvents = null;
+    let lines = 0;
+    for (const [i, g] of todo.entries()) {
+      setStatus(`${source === "official" ? "Official" : "Free"} pull ${i + 1}/${todo.length}: ${g.away.tri} @ ${g.home.tri}…`);
+      lines += source === "official" ? await pullOfficial(g) : await pullFree(g);
+    }
+    S.status[source === "official" ? "last_official" : "last_free"] = new Date().toISOString();
+    await save(source === "official" ? "log" : "free", "status");
+    const um = [...new Set(S.unmatched)];
+    setStatus(`${source === "official" ? "Official" : "Free"} pull done: ${todo.length} game(s), ${lines} line(s) logged` +
+              (um.length ? `, ${um.length} unmatched name(s) — see bottom of page.` : "."));
+  });
+}
+async function sync() {
+  await run("Sync", async () => {
+    setStatus("Loading schedule from ESPN…");
+    await syncDays();
+    const added = await syncBoxes();
+    const graded = gradeAll();
+    if (graded) await save("log", "free");
+    S.status.last_sync = new Date().toISOString(); await save("status");
+    setStatus(`Synced: ${Object.keys(S.boxes).length} box scores (${added} new), ${graded} line(s) graded.`);
+  });
+}
+
+// ===================================================================== render
+function record(entries) {
+  const graded = entries.filter(e => e.pick && ["W", "L", "P"].includes(e.result));
   const W = graded.filter(e => e.result === "W").length, L = graded.filter(e => e.result === "L").length,
         P = graded.filter(e => e.result === "P").length;
   const units = graded.reduce((s, e) => s + (e.units || 0), 0);
-  const roi = graded.length ? units / graded.length : 0;
-  const bySide = side => {
-    const g = graded.filter(e => e.pick.side === side);
-    const u = g.reduce((s, e) => s + e.units, 0);
-    return g.length ? `${g.filter(e => e.result === "W").length}-${g.filter(e => e.result === "L").length} · ${(u / g.length * 100).toFixed(1)}%` : "—";
-  };
+  return { graded, W, L, P, units, roi: graded.length ? units / graded.length : 0 };
+}
+function tilesHTML(items) {
+  return items.map(([k, v]) => `<div class="tile"><small>${k}</small><b${String(v).length > 9 ? ' style="font-size:16px"' : ""}>${v}</b></div>`).join("");
+}
+const sgn = x => (x >= 0 ? "+" : "") + x.toFixed(2);
+function sideRec(graded, side) {
+  const g = graded.filter(e => e.pick.side === side);
+  const u = g.reduce((s, e) => s + e.units, 0);
+  return g.length ? `${g.filter(e => e.result === "W").length}-${g.filter(e => e.result === "L").length} · ${(u / g.length * 100).toFixed(1)}%` : "—";
+}
 
-  $("meta").textContent = `model ${status.model || "?"} · edge bar ${pct(status.edge_bar || 0.05)} · last run ${
-    status.last_run ? new Date(status.last_run).toLocaleString() : "never"}${
-    status.credits_remaining ? " · odds credits left " + status.credits_remaining : ""}`;
+function renderGame(g) {
+  const off = S.log.filter(e => e.gameId === g.gameId), fr = S.free.filter(e => e.gameId === g.gameId);
+  const when = list => list.length ? etTime(list.reduce((m, e) => e.last_logged > m ? e.last_logged : m, "")) : null;
+  const done = started(g);
+  const picks = [...off.filter(e => e.pick).map(e => ({ e, src: "o" })), ...fr.filter(e => e.pick).map(e => ({ e, src: "f" }))]
+    .sort((a, b) => b.e.pick.edge - a.e.pick.edge);
+  const res = e => e.result ? `<span class="${e.result}">${e.result} ${e.actual ?? ""}</span>` : (e.actual != null ? e.actual : "");
+  const pickRows = picks.map(({ e, src }) => {
+    const s = e.pick.side, m = s === "over" ? e.p_over : 1 - e.p_over, n = s === "over" ? e.nv_over : 1 - e.nv_over;
+    return [td(`<span class="tag ${src}">${src === "o" ? "official" : "free"}</span> ${e.player}`), td(`${s} ${e.point}`, s),
+            td(fmtPrice(e.pick.price)), td(e.pick.book || "", "l"), td(pct(m)), td(pct(n)), td(pct(e.pick.edge)),
+            td(pct(e.pick.ev)), td(e.lam.toFixed(2)), td(res(e))];
+  });
+  const allRows = (off.length ? off : fr).slice().sort((a, b) => a.player.localeCompare(b.player)).map(e => [
+    td(e.player), td(e.point), td(pct(e.p_over)), td(pct(e.nv_over)), td(e.lam.toFixed(2)),
+    td(`${fmtPrice(e.best_over.price)} ${e.best_over.book}`), td(`${fmtPrice(e.best_under.price)} ${e.best_under.book}`),
+    td(e.books), td(e.actual ?? "")]);
+  const dis = busy || done || !testsOK ? "disabled" : "";
+  return `<div class="game">
+    <div class="ghead">
+      <span class="m">${g.away.tri} @ ${g.home.tri}</span>
+      <span class="t">${etTime(g.tip)}${g.final ? " · final" : done ? " · started" : ""}
+        · <i class="over">official ${off.length ? off.length + " lines " + when(off) : "—"}</i>
+        · <i style="color:var(--free)">free ${fr.length ? fr.length + " lines " + when(fr) : "—"}</i></span>
+      <button class="off" data-off="${g.gameId}" ${dis}>⬡ ${off.length ? "Re-pull" : "Pull"}</button>
+      <button class="fr" data-free="${g.gameId}" ${dis}>◇ Free</button>
+    </div>
+    ${off.length || fr.length ? `<div class="gbody">
+      ${pickRows.length ? table(["Pick", "Bet", "Price", "Book", "Model", "Market", "Edge", "EV", "Proj", "Made"], pickRows, "")
+                        : `<div class="empty">No line clears the bar.</div>`}
+      <details style="margin:0"><summary style="margin:6px 10px">All ${off.length ? "official" : "free"} lines (${(off.length ? off : fr).length})</summary>
+        ${table(["Player", "Line", "Model over", "Market over", "Proj", "Best over", "Best under", "Books", "Made"], allRows, "")}
+      </details></div>` : ""}
+  </div>`;
+}
 
-  $("tiles").innerHTML = [
-    ["Graded picks", graded.length + " / 150"],
-    ["Record", `${W}-${L}${P ? "-" + P : ""}`],
-    ["Units", (units >= 0 ? "+" : "") + units.toFixed(2)],
-    ["ROI", (roi * 100).toFixed(1) + "%"],
-    ["Overs", bySide("over")],
-    ["Unders", bySide("under")],
-  ].map(([k, v]) => `<div class="tile"><small>${k}</small><b${String(v).length > 9 ? ' style="font-size:16px"' : ""}>${v}</b></div>`).join("");
-  $("bar").textContent = "Real money only after 150+ graded picks with ROI of +5% or better, and it has to hold in both halves of the sample.";
+function render() {
+  const st = S.status;
+  $("meta").textContent = `model ${MODEL_VERSION} · edge bar ${pct(EDGE_BAR)} · last sync ${
+    st.last_sync ? new Date(st.last_sync).toLocaleString() : "never"}${
+    st.credits_remaining ? " · odds credits left " + st.credits_remaining : ""}`;
 
-  const today = log.length ? log[log.length - 1].date : null;
-  const tonightLines = log.filter(e => e.date === today && !("actual" in e));
-  const tonightPicks = tonightLines.filter(e => e.pick).sort((a, b) => b.pick.edge - a.pick.edge);
-  $("tonight").innerHTML = table(
-    ["Player", "Game", "Bet", "Price", "Book", "Model", "Market", "Edge", "EV", "Proj 3PM"],
-    tonightPicks.map(e => {
-      const side = e.pick.side, best = side === "over" ? e.best_over : e.best_under;
-      const m = side === "over" ? e.p_over : 1 - e.p_over, n = side === "over" ? e.nv_over : 1 - e.nv_over;
-      return [td(e.player), td(e.matchup, "l"), td(`${side} ${e.point}`, side), td(fmtPrice(best.price)),
-              td(best.book, "l"), td(pct(m)), td(pct(n)), td(pct(e.pick.edge)), td(pct(e.pick.ev)), td(e.lam.toFixed(2))];
-    }), today ? "No line clears the bar tonight." : "Nothing logged yet. The first odds pull runs before tip.");
+  const off = S.log.filter(e => e.model === MODEL_VERSION), r = record(off);
+  const byDate = r.graded.slice().sort((a, b) => a.date.localeCompare(b.date));
+  const half = Math.floor(byDate.length / 2), roiOf = a => a.length ? a.reduce((s, e) => s + e.units, 0) / a.length : 0;
+  const halves = byDate.length >= 2 ? `${(roiOf(byDate.slice(0, half)) * 100).toFixed(1)}% / ${(roiOf(byDate.slice(half)) * 100).toFixed(1)}%` : "—";
+  $("tiles").innerHTML = tilesHTML([
+    ["Graded picks", r.graded.length + " / 150"], ["Record", `${r.W}-${r.L}${r.P ? "-" + r.P : ""}`],
+    ["Units", sgn(r.units)], ["ROI", (r.roi * 100).toFixed(1) + "%"], ["ROI halves", halves],
+    ["Overs", sideRec(r.graded, "over")], ["Unders", sideRec(r.graded, "under")]]);
+  const passed = r.graded.length >= 150 && r.roi >= 0.05 && roiOf(byDate.slice(0, half)) > 0 && roiOf(byDate.slice(half)) > 0;
+  $("bar").innerHTML = (passed ? `<span class="ok">Bar cleared.</span> ` : "") +
+    "Real money only after 150+ graded picks with ROI of +5% or better, and positive in both halves taken in date order.";
 
-  const recent = graded.slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, 40);
-  $("recent").innerHTML = table(["Date", "Player", "Bet", "Price", "Made", "Result", "Units"],
-    recent.map(e => [td(e.date), td(e.player, "l"), td(`${e.pick.side} ${e.point}`, e.pick.side),
-                     td(fmtPrice(e.pick.price)), td(e.actual), td(e.result, e.result),
-                     td((e.units >= 0 ? "+" : "") + e.units.toFixed(2), e.result)]),
+  const fr = record(S.free.filter(e => e.model === MODEL_VERSION));
+  $("freetiles").innerHTML = tilesHTML([["Graded", fr.graded.length], ["Record", `${fr.W}-${fr.L}${fr.P ? "-" + fr.P : ""}`],
+    ["Units", sgn(fr.units)], ["ROI", (fr.roi * 100).toFixed(1) + "%"]]);
+
+  const games = tonight();
+  $("games").innerHTML = games.length ? games.map(renderGame).join("")
+    : `<div class="wrap"><div class="empty">${S.days[todayET()] ? "No games today." : "Loading today's games…"}</div></div>`;
+  document.querySelectorAll("[data-off]").forEach(b => b.onclick = () => doPull(games.filter(g => g.gameId === b.dataset.off), "official"));
+  document.querySelectorAll("[data-free]").forEach(b => b.onclick = () => doPull(games.filter(g => g.gameId === b.dataset.free), "free"));
+  const open = games.filter(g => !started(g)).length;
+  for (const id of ["pullAll", "freeAll", "sync"]) $(id).disabled = busy || (id !== "sync" && (!testsOK || !open));
+
+  const recent = r.graded.slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, 40);
+  $("recent").innerHTML = table(["Date", "Player", "Bet", "Price", "Book", "Made", "Result", "Units"],
+    recent.map(e => [td(e.date), td(e.player, "l"), td(`${e.pick.side} ${e.point}`, e.pick.side), td(fmtPrice(e.pick.price)),
+                     td(e.pick.book || "", "l"), td(e.actual), td(e.result, e.result), td(sgn(e.units), e.result)]),
     "No graded picks yet.");
 
-  const seen = log.filter(e => e.actual !== null && e.actual !== undefined);
+  const seen = off.filter(e => e.actual != null);
   const buckets = [[0, .3], [.3, .4], [.4, .5], [.5, .6], [.6, .7], [.7, .8], [.8, 1.01]];
   $("calib").innerHTML = table(["Model says over", "Lines", "Model avg", "Over hit", "Market avg"],
     buckets.map(([lo, hi]) => {
       const s = seen.filter(e => e.p_over >= lo && e.p_over < hi);
       if (!s.length) return null;
       const avg = k => s.reduce((t, e) => t + e[k], 0) / s.length;
-      const hit = s.filter(e => e.actual > e.point).length / s.length;
       return [td(`${Math.round(lo * 100)}–${Math.min(100, Math.round(hi * 100))}%`), td(s.length), td(pct(avg("p_over"))),
-              td(pct(hit)), td(pct(avg("nv_over")))];
+              td(pct(s.filter(e => e.actual > e.point).length / s.length)), td(pct(avg("nv_over")))];
     }).filter(Boolean), "Nothing graded yet.");
 
-  $("alllines").innerHTML = table(["Player", "Line", "Model over", "Market over", "Best over", "Best under", "Books"],
-    tonightLines.sort((a, b) => a.player.localeCompare(b.player)).map(e => [
-      td(e.player), td(e.point), td(pct(e.p_over)), td(pct(e.nv_over)),
-      td(`${fmtPrice(e.best_over.price)} ${e.best_over.book}`), td(`${fmtPrice(e.best_under.price)} ${e.best_under.book}`), td(e.books)]),
-    "No lines logged tonight.");
+  $("oddsState").innerHTML = S.keys.odds ? `<span class="ok">key saved</span>` : `<span class="no">no key</span>`;
+  $("sharpState").innerHTML = S.keys.sharp ? `<span class="ok">key saved</span>` : `<span class="no">no key</span>`;
+  $("backupState").textContent = `${S.log.length} official · ${S.free.length} free lines stored`;
+  const um = [...new Set(S.unmatched)];
+  $("unmatched").textContent = um.length ? `Unmatched names from the last pull (no box score or prior found): ${um.join(", ")}` : "";
+}
+
+// ===================================================================== settings + backup
+function changeKey(which, label) {
+  const v = prompt(`Paste your ${label} key:`, "");
+  if (v == null) return;
+  S.keys[which] = v.trim();
+  save("keys").then(render);
+}
+$("setOdds").onclick = () => changeKey("odds", "Odds API (the-odds-api.com)");
+$("setSharp").onclick = () => changeKey("sharp", "SharpAPI (sharpapi.io)");
+$("backup").onclick = () => {
+  const blob = new Blob([JSON.stringify({ app: "nba-threes", saved: new Date().toISOString(), log: S.log, free: S.free, status: S.status })],
+                        { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = `nba-threes-backup-${todayET()}.json`; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+};
+$("restoreBtn").onclick = () => $("restore").click();
+$("restore").onchange = async ev => {
+  const f = ev.target.files[0]; if (!f) return;
+  try {
+    const j = JSON.parse(await f.text());
+    if (j.app !== "nba-threes" || !Array.isArray(j.log)) throw new Error("not an NBA Threes backup");
+    if (j.log.length < S.log.length && !confirm(`The backup has ${j.log.length} official lines; this browser has ${S.log.length}. Replace anyway?`)) return;
+    S.log = j.log; S.free = j.free || []; Object.assign(S.status, j.status || {});
+    await save("log", "free", "status"); render();
+    setStatus(`Restored ${S.log.length} official and ${S.free.length} free lines.`);
+  } catch (e) { setStatus("Restore failed: " + e.message, true); }
+  ev.target.value = "";
+};
+$("pullAll").onclick = () => doPull(tonight(), "official");
+$("freeAll").onclick = () => doPull(tonight(), "free");
+$("sync").onclick = sync;
+
+// ===================================================================== boot
+(async () => {
+  const fails = selfTest();
+  testsOK = !fails.length;
+  if (!testsOK) { $("banner").style.display = "block"; $("banner").textContent = "Self-test failed, pulls are blocked: " + fails.join("; "); }
+  await DB.open();
+  await loadState();
+  try {
+    const raw = await (await fetch("data/prior.json")).json();
+    for (const p of Object.values(raw)) S.prior[normName(p.name)] = p;
+  } catch { setStatus("Couldn't load data/prior.json — projections will need 5 games of history.", true); }
+  render();
+  await sync();
 })();
 </script>
 </body>

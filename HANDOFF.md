@@ -1,41 +1,37 @@
 # NBA Threes Engine — HANDOFF
 
-Started 2026-10-27. A Strikeout-Engine-style tool for NBA made-threes props. It logs every threes line before tip, projects each player, flags picks that clear a locked bar, and grades them the next morning. **No real money until the forward test clears the bar below.**
+Started 2026-10-27. A Strikeout-Engine-style page for NBA made-threes props. Tim pulls lines by hand before tip (official = Odds API, free = SharpAPI DK/FD); it projects each player, flags picks that clear a locked bar, and grades them once ESPN has the box score. **No real money until the forward test clears the bar below.**
 
 ## Status
 
-- **Built and tested; not yet running.** Code, tests, page and the GitHub schedule are done. Nothing has hit the live NBA or odds feeds yet, because the workspace it was built in couldn't reach cdn.nba.com. The first real run is the real test.
-- **27 Oct 2026 (Code):** setup steps 1, 2 and 4 done. Repo: https://github.com/oldstone07/nba-threes (public, same account as strikeout-engine). Pages: https://oldstone07.github.io/nba-threes/. The `daily` workflow is active, so the cron runs start on their own. Tests pass locally (8/8).
-- **Next:** Tim adds the `ODDS_API_KEY` secret (step 3), then does one manual run (step 5). Until the secret exists, scheduled runs log `no ODDS_API_KEY set; skipping odds` and only fetch NBA data. If you reuse the MLB key, the live one is the one in `~/.config/mlb-scanner/odds_key`; the old app-container key is deactivated.
-- **Watch:** a plain `curl` from Tim's Mac to cdn.nba.com returned 403 on 27 Oct. The engine sends its own User-Agent/Referer, so it may still work, but the first Actions log will tell. If the schedule step 403s, the feed is blocking automated requests. Decide then; don't jump straight to header spoofing.
+- **27 Oct 2026: switched to a browser page with Pull buttons, like the Strikeout Engine.** Tim wants to pull by hand each night, so `index.html` is now the whole engine. The GitHub schedule (`daily.yml`) is **disabled** (`disabled_manually`) and never ran. `engine.py` stays as the reference implementation and the source of the tests.
+- Repo: https://github.com/oldstone07/nba-threes (public). Page: https://oldstone07.github.io/nba-threes/
+- **Verified 27 Oct, local server:** the self-test passes; ESPN sync loaded 52 box scores from opening night (20 Oct); a free pull on real SharpAPI lines logged 41 lines across 4 games with 0 unmatched names; 5 of those lines were re-run through `engine.py` and matched exactly (lam, p_over, no-vig, pick). The official pull was tested with a mock Odds API response only: parsing, re-pull updates the same row, unmatched names get reported, credits are read, grading is right.
+- **Not yet verified:** a real official pull with Tim's Odds API key. On the first one, check that `odds credits left` appears in the header. It reads the `x-requests-remaining` header; if the Odds API doesn't expose it to browsers, the page just won't show it.
+- **Next:** Tim opens the page, adds both keys under Settings (Odds API = official; SharpAPI = free. The SharpAPI key is the one in `Engines/Promo EV/key.txt`), then pulls.
 
-## Setup (do these in order)
+## Using it
 
-1. Put this folder at `~/Workshop/Engines/NBA Threes/` and open a Code session there.
-2. Create a GitHub repo for it (same account as strikeout-engine) and push this folder.
-3. Add the repo secret `ODDS_API_KEY` (Settings → Secrets and variables → Actions). Tim pastes the key there himself; it never goes in a chat or a file.
-4. Turn on GitHub Pages from the main branch. The page is `index.html`.
-5. Actions → daily → Run workflow (odds on). Check the log for:
-   - `schedule: N regular-season games, M final` with M > 0
-   - `box scores added:` a number > 0 on the first run (it backfills the season)
-   - `games with lines:` > 0 and `lines logged:` > 0
-   - `unmatched names:` should be short. Any name listed there needs a fix in `norm_name`.
-   - `x-requests-remaining` in `data/status.json`
-6. If the NBA feed refuses GitHub's servers, run `python engine.py run --odds` on the Mac with launchd instead (the same way On-Site Rates used to run).
+1. Open the page. It syncs ESPN by itself on load: schedule, box scores for finished games, grading.
+2. **⬡ Pull / Re-pull** (per game) or **⬡ Pull all (official):** Odds API `player_threes`, about 1 credit per game. This is the bet of record, and the only source the forward test counts.
+3. **◇ Free / Free pull all:** SharpAPI, DraftKings + FanDuel main lines, free (12 requests/min; one request covers the whole slate). Saved in a separate list and scored separately under "Free-line picks"; never mixed into the forward test.
+4. Re-pulling before tip updates the same row (`pulls` count, `last_logged`). The first pull's prices and pick are kept in `first`, so early vs late pulls can be compared later.
+5. Games lock at tip.
+6. **Download backup** now and then. Everything lives in this browser's IndexedDB (`nba-threes`) on the oldstone07.github.io origin, and clearing site data wipes it. Restore takes a backup file.
 
 ## How it works
 
-`engine.py` (stdlib Python, no installs):
+`index.html` (no build, no installs), ported line for line from `engine.py` v1:
 
-- **NBA data:** schedule from `cdn.nba.com/static/json/staticData/scheduleLeagueV2.json`; box scores from `cdn.nba.com/static/json/liveData/boxscore/boxscore_<gameId>.json`. Each finished game is cached slim in `data/boxscores/`.
-- **Odds:** The Odds API `player_threes`, region `us`, one pull per game before tip. Raw snapshots are saved in `data/odds/<date>/` — that is the price history the backtest never had.
+- **NBA data:** ESPN `site.api.espn.com` scoreboard (one call per day from `SEASON_START`; finished days are cached) and `summary?event=` box scores (cached slim). cdn.nba.com is blocked for browsers (CORS) and returned 403 to a plain curl, so ESPN replaced it. Players are matched by normalised name (`normName`), not ID.
+- **Prior:** `data/prior.json` (2025-26 per-player 3PA/3PM), re-keyed by normalised name on load.
 - **Projection (v1):** attempts = half last-10 average, half season average (last season counts as 10 games of history); 3P% regressed toward 36% with a 100-attempt prior seeded from last season; made threes follow a negative binomial (size 12) instead of Poisson.
 - **Pick rule (locked):** bet a side only when model probability minus the no-vig market probability is at least 5 points **and** the bet is +EV at the best available price. Over or under.
-- **Log:** every line goes in `data/log.json`, picks or not, so calibration can be checked on everything. Re-runs before tip update the same row; they never duplicate it.
-- **Grading:** next morning. Player didn't play → void. Flat 1 unit at the best price.
-- **Schedule:** `.github/workflows/daily.yml` runs tests, then the engine, at 7 AM ET (grade only) and 5:45 PM EDT / 4:45 PM EST (odds), then commits `data/`. Weekend afternoon tips can be missed by the evening run; that is acceptable for v1.
+- **Log:** every line, picks or not, so calibration can be checked on everything. Every book's prices are kept on the row (`prices`).
+- **Grading:** automatic once ESPN has the box score. Player didn't play → void. Flat 1 unit at the best price.
+- **Self-test:** the assertions from `tests/test_engine.py` run on every page load. If any fails, a red banner shows and the pull buttons are disabled.
 
-Credits: about one per game per night (plus whatever the events list costs). A 7-game night is about 7 credits; a month is roughly 200–250. Check whether the free plan's 500 covers it after the first week.
+Credits: about one per game per pull (the events list is free). A 7-game night is about 7 credits; re-pulls cost again.
 
 ## The bar (locked before any results)
 
@@ -73,11 +69,11 @@ Early season is still a little overconfident: in the first 10 games, the 50–60
 
 | File | What it is |
 | --- | --- |
-| `engine.py` | The engine |
-| `index.html` | Scoreboard page for GitHub Pages |
-| `.github/workflows/daily.yml` | The twice-daily schedule |
+| `index.html` | The engine: pull buttons, projection, log, grading, self-test (GitHub Pages) |
+| `engine.py` | Original Python engine; reference implementation, and what `tests/` run against |
+| `.github/workflows/daily.yml` | The old twice-daily schedule. Disabled on GitHub; re-enable in the Actions tab to go back to automatic |
 | `data/prior.json` | 2025-26 per-player 3PA/3PM, from shufinskiy/nba_data shot detail |
-| `data/log.json` | Every logged line and its result |
+| `data/log.json` | Unused since the browser switch (the log lives in the browser; use Download backup) |
 | `tests/` | Assertion tests and the season replay |
 | `threes_backtest.py` | The first, simpler three-season backtest |
 
@@ -85,4 +81,8 @@ Early season is still a little overconfident: in the first 10 games, the 50–60
 
 - Is the Odds API key still on a paid plan, or is the free 500-credit plan enough?
 - Which books does Tim bet on in Ohio? If it's only one or two, the "best price" should be limited to those.
-- Should the evening run also cover early weekend tips (a second, earlier odds pull)?
+- Pull timing: early vs close to tip. Every row keeps its first-pull prices, so the log can answer this after a few weeks.
+
+## Session log
+
+- **27 Oct 2026:** repo created and pushed, Pages on. Tim chose manual pulls, so the engine was ported into `index.html` with official + free pulls (per game and all), ESPN data, in-page self-test, IndexedDB storage and backup/restore. GitHub schedule disabled.
