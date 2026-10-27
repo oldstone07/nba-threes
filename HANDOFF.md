@@ -5,7 +5,9 @@ Started 2026-10-27. A Strikeout-Engine-style tool for NBA made-threes props. It 
 ## Status
 
 - **Built and tested; not yet running.** Code, tests, page and the GitHub schedule are done. Nothing has hit the live NBA or odds feeds yet, because the workspace it was built in couldn't reach cdn.nba.com. The first real run is the real test.
-- **Next:** setup steps below, then trigger one run by hand and check the output.
+- **27 Oct 2026 (Code):** setup steps 1, 2 and 4 done. Repo: https://github.com/oldstone07/nba-threes (public, same account as strikeout-engine). Pages: https://oldstone07.github.io/nba-threes/. The `daily` workflow is active, so the cron runs start on their own. Tests pass locally (8/8).
+- **Next:** Tim adds the `ODDS_API_KEY` secret (step 3), then does one manual run (step 5). Until the secret exists, scheduled runs log `no ODDS_API_KEY set; skipping odds` and only fetch NBA data. If you reuse the MLB key, the live one is the one in `~/.config/mlb-scanner/odds_key`; the old app-container key is deactivated.
+- **Watch:** a plain `curl` from Tim's Mac to cdn.nba.com returned 403 on 27 Oct. The engine sends its own User-Agent/Referer, so it may still work, but the first Actions log will tell. If the schedule step 403s, the feed is blocking automated requests. Decide then; don't jump straight to header spoofing.
 
 ## Setup (do these in order)
 
