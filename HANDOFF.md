@@ -89,4 +89,5 @@ Early season is still a little overconfident: in the first 10 games, the 50–60
 
 ## Session log
 
+- **28 Oct 2026:** Tim reports the first full night (27 Oct) logged with official pulls. Plan: forward only, one Pull all a night. Historical odds need a paid Odds API plan, so no backtest on the free 500 (resets 1 Nov). Tim tracks CLV in Pikkit, so the page won't add it. Open item: 150 picks is noise-level (±8 ROI pts), so it's a checkpoint; a real verdict needs ~1,000–1,600 picks. Tim hasn't decided whether to show that on the page.
 - **27 Oct 2026:** repo created and pushed, Pages on. Tim chose manual pulls, so the engine was ported into `index.html` with official + free pulls (per game and all), ESPN data, in-page self-test, IndexedDB storage and backup/restore. GitHub schedule disabled.
