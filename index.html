@@ -58,6 +58,13 @@
   .set-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 10px; border-bottom: 1px solid var(--rule); }
   .set-row:last-child { border-bottom: 0; }
   .ok { color: var(--win); } .no { color: var(--loss); }
+  .pfbox { border: 1px solid var(--cyan); background: var(--panel); margin-bottom: 10px; }
+  .pfbox h3 { margin: 0; padding: 8px 10px; font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+              color: var(--cyan); border-bottom: 1px solid var(--rule); font-weight: 600; }
+  .pf { display: inline-block; min-width: 16px; text-align: center; font-size: 10px; font-weight: 700; padding: 0 3px;
+        margin-right: 2px; color: var(--bg); background: var(--cyan); }
+  tr.pfrow td { background: rgba(54, 197, 216, .08); }
+  .live { color: var(--amber); }
 </style>
 </head>
 <body>
@@ -72,7 +79,12 @@
   <div class="tiles" id="tiles"></div>
   <p class="note" id="bar"></p>
 
+  <h2>Paper portfolios <span style="text-transform:none;letter-spacing:0">(locked 1 Nov · max 4 a night each)</span></h2>
+  <div class="wrap" id="pfTable"></div>
+  <p class="note">A portfolio graduates to real bets at 300+ picks, ROI +5% or better, and wins at least 2 SD above what the books expected.</p>
+
   <h2>Tonight</h2>
+  <div id="pfTonight"></div>
   <div class="bar">
     <button class="off" id="pullAll" title="Odds API, about 1 credit per game. Logs the bet of record.">⬡ Pull all (official)</button>
     <button class="fr" id="freeAll" title="SharpAPI, free. DraftKings + FanDuel only. Saved separately; never counts toward the forward test.">◇ Free pull all</button>
@@ -120,6 +132,19 @@ const MIN_GAMES_NO_PRIOR = 5;   // players with no last-season data need this ma
 const LAST_N = 10;              // recent-form window
 const DISPERSION = 12;          // negative-binomial size; fit on 2024-25, checked on 2025-26
 const SEASON_START = "2026-10-20";  // 2026-27 opening night
+
+// Paper portfolios, locked 1 Nov 2026 before any of their games were played. Each takes
+// at most PF_MAX official picks a night, ranked as below. Don't edit these; add new ones
+// with a later start date instead, so each is only ever judged on games after it was set.
+const PF_START = "2026-11-01", PF_MAX = 4;
+const PORTFOLIOS = [
+  { id: "A", name: "Unders by edge", ok: p => p.side === "under", rank: p => p.edge },
+  { id: "B", name: "Mid edges 8–12%", ok: p => p.edge >= 0.08 && p.edge < 0.12, rank: p => p.edge },
+  { id: "C", name: "Mid-edge unders 5–12%", ok: p => p.side === "under" && p.edge >= 0.05 && p.edge < 0.12, rank: p => p.edge },
+  { id: "D", name: "Model's top 4 by EV", ok: () => true, rank: p => p.ev },
+];
+// Bar for real money: PF_BAR_N+ picks, ROI >= PF_BAR_ROI, wins >= 2 SD above the books' expectation.
+const PF_BAR_N = 300, PF_BAR_ROI = 0.05, PF_BAR_Z = 2;
 
 const ESPN = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba";
 const ODDS = "https://api.the-odds-api.com/v4/sports/basketball_nba";
@@ -224,6 +249,18 @@ function onePickPerPlayer(rows) {
   for (const e of rows) if (e.pick && (!best[e.pkey] || e.pick.edge > best[e.pkey].pick.edge)) best[e.pkey] = e;
   for (const e of rows) if (e.pick && best[e.pkey] !== e) { e.pick_dropped = e.pick; e.pick = null; }
 }
+// Tag one night's rows with portfolio ids. Rows whose game has tipped keep their tags
+// (no swapping a played pick out after the fact); open slots are refilled by rank.
+function assignPortfolios(rows, now) {
+  const started = e => new Date(e.tip) <= now;
+  for (const pf of PORTFOLIOS) {
+    const locked = rows.filter(e => started(e) && (e.pf || []).includes(pf.id)).length;
+    const open = rows.filter(e => !started(e));
+    for (const e of open) e.pf = (e.pf || []).filter(x => x !== pf.id);
+    open.filter(e => e.pick && pf.ok(e.pick)).sort((a, b) => pf.rank(b.pick) - pf.rank(a.pick))
+        .slice(0, Math.max(0, PF_MAX - locked)).forEach(e => e.pf.push(pf.id));
+  }
+}
 function gradeEntry(e, box) {
   const p = box.players.find(x => x.key === e.pkey);
   if (!p || !p.played) { Object.assign(e, { actual: null, result: "V", units: 0 }); return; }
@@ -274,6 +311,16 @@ function selfTest() {
     { key: "draftkings", markets: [{ key: "player_threes", outcomes: [{ name: "Over", description: "A B", point: 1.5, price: 120 }, { name: "Under", description: "A B", point: 1.5, price: -150 }] }] },
     { key: "bovada", markets: [{ key: "player_threes", outcomes: [{ name: "Over", description: "A B", point: 1.5, price: 200 }] }] }] });
   ok(Object.keys(parsed["A B|1.5"].books).join() === "draftkings", "only Tim's books");
+  const later = "2099-01-01T00:00:00Z", earlier = "2000-01-01T00:00:00Z", T = new Date("2050-01-01T00:00:00Z");
+  const mkRow = (id, side, edge, tip, pf) => ({ id, tip, pf, pick: { side, edge, ev: edge } });
+  const night = [mkRow(1, "under", .06, later), mkRow(2, "under", .11, later), mkRow(3, "under", .09, later),
+                 mkRow(4, "under", .07, later), mkRow(5, "under", .05, later), mkRow(6, "over", .10, later),
+                 mkRow(7, "under", .01, earlier, ["A"])];  // already tipped, already in A
+  assignPortfolios(night, T);
+  const inA = night.filter(e => e.pf.includes("A")).map(e => e.id).sort().join();
+  ok(inA === "2,3,4,7", "portfolio A keeps tipped pick, fills 3 open by edge");
+  ok(night.filter(e => e.pf.includes("B")).map(e => e.id).sort().join() === "2,3,6", "portfolio B band");
+  ok(night.filter(e => e.pf.includes("D")).length === 4 && !night[6].pf.includes("D"), "portfolio D max 4, no retro-add");
   return fails;
 }
 
@@ -315,7 +362,7 @@ const td = (v, cls = "") => `<td class="${cls}">${v}</td>`;
 function table(cols, rows, empty) {
   if (!rows.length) return `<div class="empty">${empty}</div>`;
   return `<table><thead><tr>${cols.map(c => `<th>${c}</th>`).join("")}</tr></thead><tbody>${
-    rows.map(r => `<tr>${r.join("")}</tr>`).join("")}</tbody></table>`;
+    rows.map(r => `<tr class="${r.cls || ""}">${r.join("")}</tr>`).join("")}</tbody></table>`;
 }
 async function getJSON(url, opts) {
   const r = await fetch(url, opts);
@@ -332,7 +379,7 @@ function parseDay(sb) {
     const c = e.competitions[0], side = ha => c.competitors.find(x => x.homeAway === ha).team;
     const h = side("home"), a = side("away");
     return { gameId: e.id, tip: e.date, date: etDate(e.date), state: e.status.type.state,
-             final: !!e.status.type.completed,
+             final: !!e.status.type.completed, detail: e.status.type.shortDetail || "",
              home: { tri: h.abbreviation, name: h.name }, away: { tri: a.abbreviation, name: a.name } };
   });
 }
@@ -522,6 +569,8 @@ async function doPull(games, source) {
       setStatus(`${source === "official" ? "Official" : "Free"} pull ${i + 1}/${todo.length}: ${g.away.tri} @ ${g.home.tri}…`);
       lines += source === "official" ? await pullOfficial(g) : await pullFree(g);
     }
+    if (source === "official" && todayET() >= PF_START)
+      assignPortfolios(S.log.filter(e => e.date === todayET() && e.model === MODEL_VERSION), new Date());
     S.status[source === "official" ? "last_official" : "last_free"] = new Date().toISOString();
     await save(source === "official" ? "log" : "free", "status");
     const um = [...new Set(S.unmatched)];
@@ -541,6 +590,32 @@ async function sync() {
   });
 }
 
+// ===================================================================== live tracking
+// While games are on, refresh tonight's scoreboard + in-progress box scores every minute
+// so portfolio bets show made threes as they happen. Finished games get graded.
+const LIVE = {};  // gameId -> {pkey: fg3m}
+async function liveTick() {
+  if (busy || document.hidden) return;
+  const today = todayET();
+  const before = S.days[today]?.games || [];
+  if (!before.some(g => started(g) && !g.final)) return;
+  try {
+    const [sb] = await getJSON(`${ESPN}/scoreboard?dates=${ymd(today)}`);
+    const games = parseDay(sb);
+    S.days[today] = { done: false, games };
+    for (const g of games.filter(g => g.state === "in")) {
+      const [sum] = await getJSON(`${ESPN}/summary?event=${g.gameId}`);
+      LIVE[g.gameId] = Object.fromEntries(slimBox(sum, g).players.map(p => [p.key, p.fg3m]));
+    }
+    const newlyFinal = games.some(g => g.final && !S.boxes[g.gameId]);
+    if (newlyFinal) { await syncBoxes(); if (gradeAll()) await save("log", "free"); }
+    await save("days");
+    render();
+  } catch (e) { console.warn("live", e.message); }
+}
+setInterval(liveTick, 60000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) liveTick(); });
+
 // ===================================================================== render
 function record(entries) {
   const graded = entries.filter(e => e.pick && ["W", "L", "P"].includes(e.result));
@@ -559,6 +634,47 @@ function sideRec(graded, side) {
   return g.length ? `${g.filter(e => e.result === "W").length}-${g.filter(e => e.result === "L").length} · ${(u / g.length * 100).toFixed(1)}%` : "—";
 }
 
+const badges = e => (e.pf || []).map(id => `<span class="pf">${id}</span>`).join("");
+const sideProb = (e, key) => e.pick.side === "over" ? e[key] : 1 - e[key];
+// "2 of 3.5 · Q3 5:12", or a settled hit/bust as soon as the count decides it
+function liveCell(e, g) {
+  if (e.result) return `<span class="${e.result}">${e.result} · ${e.actual ?? "DNP"}</span>`;
+  if (!g || !started(g)) return `<span class="meta">${etTime((g || e).tip)}</span>`;
+  const made = LIVE[e.gameId]?.[e.pkey];
+  if (made == null) return `<span class="live">${g.detail || "live"}</span>`;
+  const over = e.pick.side === "over";
+  if (made > e.point) return `<span class="${over ? "W" : "L"}">${made} · ${over ? "hit ✓" : "busted"}</span>`;
+  return `<span class="live">${made} of ${e.point} · ${g.detail}</span>`;
+}
+function pfRecord(pf) {
+  const rows = S.log.filter(e => e.model === MODEL_VERSION && e.date >= PF_START && (e.pf || []).includes(pf.id)
+                                 && e.pick && ["W", "L", "P"].includes(e.result));
+  const W = rows.filter(e => e.result === "W").length, L = rows.filter(e => e.result === "L").length;
+  const units = rows.reduce((s, e) => s + e.units, 0), roi = rows.length ? units / rows.length : 0;
+  const exp = rows.reduce((s, e) => s + sideProb(e, "nv_over"), 0);
+  const sd = Math.sqrt(rows.reduce((s, e) => { const p = sideProb(e, "nv_over"); return s + p * (1 - p); }, 0));
+  const z = sd ? (W - exp) / sd : 0;
+  return { n: rows.length, W, L, units, roi, exp, z, cleared: rows.length >= PF_BAR_N && roi >= PF_BAR_ROI && z >= PF_BAR_Z };
+}
+function renderPortfolios() {
+  $("pfTable").innerHTML = table(["Portfolio", "Picks", "Record", "Units", "ROI", "Wins vs books", "Status"],
+    PORTFOLIOS.map(pf => {
+      const r = pfRecord(pf);
+      return [td(`<span class="pf">${pf.id}</span> ${pf.name}`), td(`${r.n} / ${PF_BAR_N}`), td(`${r.W}-${r.L}`),
+              td(sgn(r.units), r.units >= 0 ? "W" : "L"), td((r.roi * 100).toFixed(1) + "%"),
+              td(r.n ? `${r.W} vs ${r.exp.toFixed(1)} (${r.z >= 0 ? "+" : ""}${r.z.toFixed(1)} SD)` : "—"),
+              td(r.cleared ? `<span class="ok">cleared</span>` : r.n ? "tracking" : "starts tonight", "l")];
+    }), "");
+  const today = todayET(), games = Object.fromEntries(tonight().map(g => [g.gameId, g]));
+  const rows = S.log.filter(e => e.date === today && e.model === MODEL_VERSION && (e.pf || []).length)
+    .sort((a, b) => a.tip.localeCompare(b.tip) || b.pick.edge - a.pick.edge);
+  $("pfTonight").innerHTML = today < PF_START ? "" : `<div class="pfbox"><h3>Portfolio bets tonight (${rows.length})</h3>${
+    table(["", "Player", "Game", "Bet", "Price", "Book", "Edge", "Live / result"],
+      rows.map(e => [td(badges(e)), td(e.player, "l"), td(e.matchup, "l"), td(`${e.pick.side} ${e.point}`, e.pick.side),
+                     td(fmtPrice(e.pick.price)), td(e.pick.book || "", "l"), td(pct(e.pick.edge)), td(liveCell(e, games[e.gameId]))]),
+      "No portfolio bets yet. Do the official pull and they'll show here.")}</div>`;
+}
+
 function renderGame(g) {
   const cur = e => e.gameId === g.gameId && e.model === MODEL_VERSION;  // older-version rows stay in the log, off the board
   const off = S.log.filter(cur), fr = S.free.filter(cur);
@@ -569,9 +685,11 @@ function renderGame(g) {
   const res = e => e.result ? `<span class="${e.result}">${e.result} ${e.actual ?? ""}</span>` : (e.actual != null ? e.actual : "");
   const pickRows = picks.map(({ e, src }) => {
     const s = e.pick.side, m = s === "over" ? e.p_over : 1 - e.p_over, n = s === "over" ? e.nv_over : 1 - e.nv_over;
-    return [td(`<span class="tag ${src}">${src === "o" ? "official" : "free"}</span> ${e.player}`), td(`${s} ${e.point}`, s),
+    const row = [td(`${badges(e)}<span class="tag ${src}">${src === "o" ? "official" : "free"}</span> ${e.player}`), td(`${s} ${e.point}`, s),
             td(fmtPrice(e.pick.price)), td(e.pick.book || "", "l"), td(pct(m)), td(pct(n)), td(pct(e.pick.edge)),
-            td(pct(e.pick.ev)), td(e.lam.toFixed(2)), td(res(e))];
+            td(pct(e.pick.ev)), td(e.lam.toFixed(2)), td(src === "o" && (e.pf || []).length ? liveCell(e, g) : res(e))];
+    if (src === "o" && (e.pf || []).length) row.cls = "pfrow";
+    return row;
   });
   const allRows = (off.length ? off : fr).slice().sort((a, b) => a.player.localeCompare(b.player)).map(e => [
     td(e.player), td(e.point), td(pct(e.p_over)), td(pct(e.nv_over)), td(e.lam.toFixed(2)),
@@ -614,6 +732,7 @@ function render() {
   $("bar").innerHTML = (passed ? `<span class="ok">Bar cleared.</span> ` : "") +
     "Real money only after 150+ graded picks with ROI of +5% or better, and positive in both halves taken in date order.";
 
+  renderPortfolios();
   const fr = record(S.free.filter(e => e.model === MODEL_VERSION));
   $("freetiles").innerHTML = tilesHTML([["Graded", fr.graded.length], ["Record", `${fr.W}-${fr.L}${fr.P ? "-" + fr.P : ""}`],
     ["Units", sgn(fr.units)], ["ROI", (fr.roi * 100).toFixed(1) + "%"]]);
