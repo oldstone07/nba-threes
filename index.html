@@ -79,7 +79,7 @@
   <div class="tiles" id="tiles"></div>
   <p class="note" id="bar"></p>
 
-  <h2>Paper portfolios <span style="text-transform:none;letter-spacing:0">(locked 1 Nov · max 4 a night each)</span></h2>
+  <h2>Paper portfolios <span style="text-transform:none;letter-spacing:0">(locked 1 Nov · every bet qualifies on its own)</span></h2>
   <div class="wrap" id="pfTable"></div>
   <p class="note">A portfolio graduates to real bets at 300+ picks, ROI +5% or better, and wins at least 2 SD above what the books expected.</p>
 
@@ -133,15 +133,18 @@ const LAST_N = 10;              // recent-form window
 const DISPERSION = 12;          // negative-binomial size; fit on 2024-25, checked on 2025-26
 const SEASON_START = "2026-10-20";  // 2026-27 opening night
 
-// Paper portfolios, locked 1 Nov 2026 before any of their games were played. Each takes
-// at most PF_MAX official picks a night, ranked as below. Don't edit these; add new ones
-// with a later start date instead, so each is only ever judged on games after it was set.
-const PF_START = "2026-11-01", PF_MAX = 4;
+// Paper portfolios, locked 1 Nov 2026 before any of their games were played. Every bet
+// qualifies on its own (no ranking across the night, no nightly cap), like the Strikeout
+// Engine's gates. "share" = games played / team games so far this season, so the
+// regular-player gate means the same thing in March as in November.
+// Don't edit these; add new ones with a later start date instead.
+const PF_START = "2026-11-01", PF_SHARE = 0.80;
+const under = e => e.pick.side === "under", band = (e, lo, hi) => e.pick.edge >= lo && e.pick.edge < hi;
 const PORTFOLIOS = [
-  { id: "A", name: "Unders by edge", ok: p => p.side === "under", rank: p => p.edge },
-  { id: "B", name: "Mid edges 8–12%", ok: p => p.edge >= 0.08 && p.edge < 0.12, rank: p => p.edge },
-  { id: "C", name: "Mid-edge unders 5–12%", ok: p => p.side === "under" && p.edge >= 0.05 && p.edge < 0.12, rank: p => p.edge },
-  { id: "D", name: "Model's top 4 by EV", ok: () => true, rank: p => p.ev },
+  { id: "A", name: "Under · edge 8–12% · played 80%+", ok: e => under(e) && band(e, .08, .12) && e.share >= PF_SHARE },
+  { id: "B", name: "Under · edge 8–12%", ok: e => under(e) && band(e, .08, .12) },
+  { id: "C", name: "Under · edge 10–15%", ok: e => under(e) && band(e, .10, .15) },
+  { id: "D", name: "Either side · edge 8–12% · played 80%+", ok: e => band(e, .08, .12) && e.share >= PF_SHARE },
 ];
 // Bar for real money: PF_BAR_N+ picks, ROI >= PF_BAR_ROI, wins >= 2 SD above the books' expectation.
 const PF_BAR_N = 300, PF_BAR_ROI = 0.05, PF_BAR_Z = 2;
@@ -249,16 +252,15 @@ function onePickPerPlayer(rows) {
   for (const e of rows) if (e.pick && (!best[e.pkey] || e.pick.edge > best[e.pkey].pick.edge)) best[e.pkey] = e;
   for (const e of rows) if (e.pick && best[e.pkey] !== e) { e.pick_dropped = e.pick; e.pick = null; }
 }
-// Tag one night's rows with portfolio ids. Rows whose game has tipped keep their tags
-// (no swapping a played pick out after the fact); open slots are refilled by rank.
-function assignPortfolios(rows, now) {
-  const started = e => new Date(e.tip) <= now;
-  for (const pf of PORTFOLIOS) {
-    const locked = rows.filter(e => started(e) && (e.pf || []).includes(pf.id)).length;
-    const open = rows.filter(e => !started(e));
-    for (const e of open) e.pf = (e.pf || []).filter(x => x !== pf.id);
-    open.filter(e => e.pick && pf.ok(e.pick)).sort((a, b) => pf.rank(b.pick) - pf.rank(a.pick))
-        .slice(0, Math.max(0, PF_MAX - locked)).forEach(e => e.pf.push(pf.id));
+const pfTags = e => e.pick ? PORTFOLIOS.filter(pf => pf.ok(e)).map(pf => pf.id) : [];
+// (Re)tag official rows from PF_START on whose game hasn't tipped. Tipped rows keep their tags.
+function tagOpenRows(now = new Date()) {
+  const { teamGames } = history();
+  for (const e of S.log) {
+    if (e.model !== MODEL_VERSION || e.date < PF_START || new Date(e.tip) <= now) continue;
+    e.team_games = (teamGames[e.team] || []).filter(d => d < e.date).length;
+    e.share = e.team_games ? +(e.games / e.team_games).toFixed(3) : 0;
+    e.pf = pfTags(e);
   }
 }
 function gradeEntry(e, box) {
@@ -311,16 +313,14 @@ function selfTest() {
     { key: "draftkings", markets: [{ key: "player_threes", outcomes: [{ name: "Over", description: "A B", point: 1.5, price: 120 }, { name: "Under", description: "A B", point: 1.5, price: -150 }] }] },
     { key: "bovada", markets: [{ key: "player_threes", outcomes: [{ name: "Over", description: "A B", point: 1.5, price: 200 }] }] }] });
   ok(Object.keys(parsed["A B|1.5"].books).join() === "draftkings", "only Tim's books");
-  const later = "2099-01-01T00:00:00Z", earlier = "2000-01-01T00:00:00Z", T = new Date("2050-01-01T00:00:00Z");
-  const mkRow = (id, side, edge, tip, pf) => ({ id, tip, pf, pick: { side, edge, ev: edge } });
-  const night = [mkRow(1, "under", .06, later), mkRow(2, "under", .11, later), mkRow(3, "under", .09, later),
-                 mkRow(4, "under", .07, later), mkRow(5, "under", .05, later), mkRow(6, "over", .10, later),
-                 mkRow(7, "under", .01, earlier, ["A"])];  // already tipped, already in A
-  assignPortfolios(night, T);
-  const inA = night.filter(e => e.pf.includes("A")).map(e => e.id).sort().join();
-  ok(inA === "2,3,4,7", "portfolio A keeps tipped pick, fills 3 open by edge");
-  ok(night.filter(e => e.pf.includes("B")).map(e => e.id).sort().join() === "2,3,6", "portfolio B band");
-  ok(night.filter(e => e.pf.includes("D")).length === 4 && !night[6].pf.includes("D"), "portfolio D max 4, no retro-add");
+  const tags = (side, edge, share) => pfTags({ share, pick: { side, edge } }).join("");
+  ok(tags("under", .09, .9) === "ABD", "pf under 9% regular");
+  ok(tags("under", .09, .5) === "B", "pf under 9% part-timer");
+  ok(tags("under", .11, .8) === "ABCD", "pf under 11% at exactly 80%");
+  ok(tags("under", .13, 1) === "C", "pf under 13%");
+  ok(tags("over", .10, 1) === "D", "pf over 10%");
+  ok(tags("under", .12, 1) === "C" && tags("under", .07, 1) === "", "pf band edges");
+  ok(pfTags({ share: 1, pick: null }).length === 0, "pf no pick");
   return fails;
 }
 
@@ -423,13 +423,16 @@ async function syncBoxes() {
   return added;
 }
 function history() {  // {pkey: [[date, a, m]]} played games, oldest first; plus name index
-  const hist = {}, names = {};
-  for (const box of Object.values(S.boxes)) for (const p of box.players) {
-    names[p.key] = { name: p.name, team: p.team };
-    if (p.played) (hist[p.key] ||= []).push([box.date, p.fg3a, p.fg3m]);
+  const hist = {}, names = {}, teamGames = {};  // teamGames: {tri: [date of each game played]}
+  for (const box of Object.values(S.boxes)) {
+    for (const t of new Set(box.players.map(p => p.team))) (teamGames[t] ||= []).push(box.date);
+    for (const p of box.players) {
+      names[p.key] = { name: p.name, team: p.team };
+      if (p.played) (hist[p.key] ||= []).push([box.date, p.fg3a, p.fg3m]);
+    }
   }
   for (const v of Object.values(hist)) v.sort((a, b) => a[0].localeCompare(b[0]));
-  return { hist, names };
+  return { hist, names, teamGames };
 }
 function gradeAll() {
   let n = 0;
@@ -569,8 +572,7 @@ async function doPull(games, source) {
       setStatus(`${source === "official" ? "Official" : "Free"} pull ${i + 1}/${todo.length}: ${g.away.tri} @ ${g.home.tri}…`);
       lines += source === "official" ? await pullOfficial(g) : await pullFree(g);
     }
-    if (source === "official" && todayET() >= PF_START)
-      assignPortfolios(S.log.filter(e => e.date === todayET() && e.model === MODEL_VERSION), new Date());
+    if (source === "official") tagOpenRows();
     S.status[source === "official" ? "last_official" : "last_free"] = new Date().toISOString();
     await save(source === "official" ? "log" : "free", "status");
     const um = [...new Set(S.unmatched)];
@@ -666,7 +668,7 @@ function renderPortfolios() {
               td(r.cleared ? `<span class="ok">cleared</span>` : r.n ? "tracking" : "starts tonight", "l")];
     }), "");
   const today = todayET(), games = Object.fromEntries(tonight().map(g => [g.gameId, g]));
-  const rows = S.log.filter(e => e.date === today && e.model === MODEL_VERSION && (e.pf || []).length)
+  const rows = S.log.filter(e => e.date === today && e.model === MODEL_VERSION && e.pick && (e.pf || []).length)
     .sort((a, b) => a.tip.localeCompare(b.tip) || b.pick.edge - a.pick.edge);
   $("pfTonight").innerHTML = today < PF_START ? "" : `<div class="pfbox"><h3>Portfolio bets tonight (${rows.length})</h3>${
     table(["", "Player", "Game", "Bet", "Price", "Book", "Edge", "Live / result"],
@@ -815,6 +817,7 @@ $("sync").onclick = sync;
   } catch { setStatus("Couldn't load data/prior.json — projections will need 5 games of history.", true); }
   render();
   await sync();
+  tagOpenRows(); await save("log"); render();  // picks up rule changes for games not yet tipped
 })();
 </script>
 </body>
