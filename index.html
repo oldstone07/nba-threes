@@ -109,11 +109,11 @@
       <span class="meta">Official pulls — the-odds-api.com.</span></div>
     <div class="set-row"><button id="setSharp">Change SharpAPI key</button><span id="sharpState" class="meta"></span>
       <span class="meta">Free DK/FD lines — sharpapi.io.</span></div>
-    <div class="set-row"><button id="backup">Download backup</button><button id="restoreBtn">Restore backup…</button>
+    <div class="set-row"><button id="backup">Save backup</button><button id="backupDir">Change backup folder</button><button id="restoreBtn">Restore backup…</button>
       <input type="file" id="restore" accept="application/json" style="display:none">
       <span class="meta" id="backupState"></span></div>
   </div>
-  <p class="note">Everything (keys, box scores, the log) stays in this browser. Download a backup now and then; clearing site data wipes it.</p>
+  <p class="note">Everything (keys, box scores, the log) stays in this browser. Save a backup now and then; clearing site data wipes it. The first save asks for a folder (pick Workshop › Engines › NBA Threes › backups); after that it saves there with one click.</p>
   <p class="note" id="unmatched"></p>
 </main>
 <script>
@@ -780,13 +780,39 @@ function changeKey(which, label) {
 }
 $("setOdds").onclick = () => changeKey("odds", "Odds API (the-odds-api.com)");
 $("setSharp").onclick = () => changeKey("sharp", "SharpAPI (sharpapi.io)");
-$("backup").onclick = () => {
-  const blob = new Blob([JSON.stringify({ app: "nba-threes", saved: new Date().toISOString(), log: S.log, free: S.free, status: S.status })],
-                        { type: "application/json" });
+function backupBlob() {
+  return new Blob([JSON.stringify({ app: "nba-threes", saved: new Date().toISOString(), log: S.log, free: S.free, status: S.status })],
+                  { type: "application/json" });
+}
+function downloadBackup(name) {
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob); a.download = `nba-threes-backup-${todayET()}.json`; a.click();
+  a.href = URL.createObjectURL(backupBlob()); a.download = name; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-};
+}
+async function pickBackupDir() {
+  const dir = await window.showDirectoryPicker({ id: "nba-threes-backups", mode: "readwrite", startIn: "documents" });
+  await DB.set("backupDir", dir);
+  return dir;
+}
+async function saveBackup(forcePick) {
+  const name = `nba-threes-backup-${todayET()}.json`;
+  if (!window.showDirectoryPicker) { downloadBackup(name); setStatus("This browser can't save to a folder, so the backup went to Downloads."); return; }
+  try {
+    let dir = forcePick ? null : await DB.get("backupDir");
+    if (dir && (await dir.queryPermission({ mode: "readwrite" })) !== "granted"
+        && (await dir.requestPermission({ mode: "readwrite" })) !== "granted") dir = null;
+    if (!dir) dir = await pickBackupDir();
+    const fh = await dir.getFileHandle(name, { create: true });
+    const w = await fh.createWritable(); await w.write(backupBlob()); await w.close();
+    S.status.lastBackup = new Date().toISOString(); await save("status");
+    setStatus(`Saved ${name} to the ${dir.name} folder: ${S.log.length} official and ${S.free.length} free lines.`);
+  } catch (e) {
+    if (e && e.name === "AbortError") { setStatus("Backup not saved: no folder picked."); return; }
+    setStatus("Couldn't save to the folder (" + e.message + "). Use Change backup folder and pick it again.", true);
+  }
+}
+$("backup").onclick = () => saveBackup(false);
+$("backupDir").onclick = () => saveBackup(true);
 $("restoreBtn").onclick = () => $("restore").click();
 $("restore").onchange = async ev => {
   const f = ev.target.files[0]; if (!f) return;
