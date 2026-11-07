@@ -64,6 +64,7 @@
   .pf { display: inline-block; min-width: 16px; text-align: center; font-size: 10px; font-weight: 700; padding: 0 3px;
         margin-right: 2px; color: var(--bg); background: var(--cyan); }
   tr.pfrow td { background: rgba(54, 197, 216, .08); }
+  tr.dim td { opacity: .5; }
   .live { color: var(--amber); }
 </style>
 </head>
@@ -141,13 +142,17 @@ const SEASON_START = "2026-10-20";  // 2026-27 opening night
 const PF_START = "2026-11-01", PF_SHARE = 0.80;
 const under = e => e.pick.side === "under", band = (e, lo, hi) => e.pick.edge >= lo && e.pick.edge < hi;
 const PORTFOLIOS = [
-  { id: "A", name: "Under · edge 8–12% · played 80%+", ok: e => under(e) && band(e, .08, .12) && e.share >= PF_SHARE },
+  { id: "A", name: "Under · edge 8–12% · played 80%+", ok: e => under(e) && band(e, .08, .12) && e.share >= PF_SHARE,
+    retired: "2026-11-07", why: "copy of B (29 of B's first 30 bets)" },
   { id: "B", name: "Under · edge 8–12%", ok: e => under(e) && band(e, .08, .12) },
   { id: "C", name: "Under · edge 10–15%", ok: e => under(e) && band(e, .10, .15) },
   { id: "D", name: "Either side · edge 8–12% · played 80%+", ok: e => band(e, .08, .12) && e.share >= PF_SHARE },
 ];
 // Bar for real money: PF_BAR_N+ picks, ROI >= PF_BAR_ROI, wins >= 2 SD above the books' expectation.
 const PF_BAR_N = 300, PF_BAR_ROI = 0.05, PF_BAR_Z = 2;
+// Cut rule (set 7 Nov, before any portfolio was near it): judged once, on each portfolio's
+// first PF_CUT_N graded bets in date order. Wins not above the books' expectation -> cut for good.
+const PF_CUT_N = 150;
 
 const ESPN = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba";
 const ODDS = "https://api.the-odds-api.com/v4/sports/basketball_nba";
@@ -252,15 +257,18 @@ function onePickPerPlayer(rows) {
   for (const e of rows) if (e.pick && (!best[e.pkey] || e.pick.edge > best[e.pkey].pick.edge)) best[e.pkey] = e;
   for (const e of rows) if (e.pick && best[e.pkey] !== e) { e.pick_dropped = e.pick; e.pick = null; }
 }
-const pfTags = e => e.pick ? PORTFOLIOS.filter(pf => pf.ok(e)).map(pf => pf.id) : [];
+const pfTags = (e, skip = new Set()) =>
+  e.pick ? PORTFOLIOS.filter(pf => !pf.retired && !skip.has(pf.id) && pf.ok(e)).map(pf => pf.id) : [];
 // (Re)tag official rows from PF_START on whose game hasn't tipped. Tipped rows keep their tags.
+// Retired and cut portfolios stop taking new bets; their old tags stay for the record.
 function tagOpenRows(now = new Date()) {
   const { teamGames } = history();
+  const cut = new Set(PORTFOLIOS.filter(pf => pfRecord(pf).cut).map(pf => pf.id));
   for (const e of S.log) {
     if (e.model !== MODEL_VERSION || e.date < PF_START || new Date(e.tip) <= now) continue;
     e.team_games = (teamGames[e.team] || []).filter(d => d < e.date).length;
     e.share = e.team_games ? +(e.games / e.team_games).toFixed(3) : 0;
-    e.pf = pfTags(e);
+    e.pf = pfTags(e, cut);
   }
 }
 function gradeEntry(e, box) {
@@ -314,13 +322,22 @@ function selfTest() {
     { key: "bovada", markets: [{ key: "player_threes", outcomes: [{ name: "Over", description: "A B", point: 1.5, price: 200 }] }] }] });
   ok(Object.keys(parsed["A B|1.5"].books).join() === "draftkings", "only Tim's books");
   const tags = (side, edge, share) => pfTags({ share, pick: { side, edge } }).join("");
-  ok(tags("under", .09, .9) === "ABD", "pf under 9% regular");
+  // A is retired (7 Nov), so it never appears on new tags
+  ok(tags("under", .09, .9) === "BD", "pf under 9% regular");
   ok(tags("under", .09, .5) === "B", "pf under 9% part-timer");
-  ok(tags("under", .11, .8) === "ABCD", "pf under 11% at exactly 80%");
+  ok(tags("under", .11, .8) === "BCD", "pf under 11% at exactly 80%");
   ok(tags("under", .13, 1) === "C", "pf under 13%");
   ok(tags("over", .10, 1) === "D", "pf over 10%");
   ok(tags("under", .12, 1) === "C" && tags("under", .07, 1) === "", "pf band edges");
   ok(pfTags({ share: 1, pick: null }).length === 0, "pf no pick");
+  ok(pfTags({ share: 1, pick: { side: "under", edge: .09 } }, new Set(["B"])).join("") === "D", "pf cut portfolio skipped");
+  // cut rule: 150 bets at a 50% fair price; 75 wins is not above expectation -> cut, 76 survives
+  const saved = S.log;
+  const mkBets = wins => Array.from({ length: PF_CUT_N }, (_, i) => ({ model: MODEL_VERSION, date: "2026-11-02", tip: String(i).padStart(4, "0"),
+    pf: ["B"], nv_over: 0.5, pick: { side: "under" }, result: i < wins ? "W" : "L", units: i < wins ? 1 : -1 }));
+  S.log = mkBets(75); ok(pfRecord(PORTFOLIOS[1]).cut === true, "cut at expectation");
+  S.log = mkBets(76); ok(pfRecord(PORTFOLIOS[1]).cut === false, "survives above expectation");
+  S.log = saved;
   return fails;
 }
 
@@ -656,16 +673,26 @@ function pfRecord(pf) {
   const exp = rows.reduce((s, e) => s + sideProb(e, "nv_over"), 0);
   const sd = Math.sqrt(rows.reduce((s, e) => { const p = sideProb(e, "nv_over"); return s + p * (1 - p); }, 0));
   const z = sd ? (W - exp) / sd : 0;
-  return { n: rows.length, W, L, units, roi, exp, z, cleared: rows.length >= PF_BAR_N && roi >= PF_BAR_ROI && z >= PF_BAR_Z };
+  // cut check: first PF_CUT_N bets in date order, judged once
+  const first = rows.slice().sort((a, b) => (a.date + a.tip).localeCompare(b.date + b.tip)).slice(0, PF_CUT_N);
+  const cut = first.length === PF_CUT_N &&
+    first.filter(e => e.result === "W").length <= first.reduce((s, e) => s + sideProb(e, "nv_over"), 0);
+  return { n: rows.length, W, L, units, roi, exp, z, cut,
+           cleared: !cut && rows.length >= PF_BAR_N && roi >= PF_BAR_ROI && z >= PF_BAR_Z };
 }
 function renderPortfolios() {
   $("pfTable").innerHTML = table(["Portfolio", "Picks", "Record", "Units", "ROI", "Wins vs books", "Status"],
-    PORTFOLIOS.map(pf => {
+    PORTFOLIOS.slice().sort((a, b) => !!a.retired - !!b.retired).map(pf => {
       const r = pfRecord(pf);
-      return [td(`<span class="pf">${pf.id}</span> ${pf.name}`), td(`${r.n} / ${PF_BAR_N}`), td(`${r.W}-${r.L}`),
+      const status = pf.retired ? `<span class="meta">retired ${pf.retired.slice(5)} · ${pf.why}</span>`
+        : r.cut ? `<span class="no">cut at ${PF_CUT_N}</span>`
+        : r.cleared ? `<span class="ok">cleared</span>`
+        : r.n < PF_CUT_N ? `tracking · cut check at ${PF_CUT_N}` : "tracking";
+      const row = [td(`<span class="pf">${pf.id}</span> ${pf.name}`), td(`${r.n} / ${PF_BAR_N}`), td(`${r.W}-${r.L}`),
               td(sgn(r.units), r.units >= 0 ? "W" : "L"), td((r.roi * 100).toFixed(1) + "%"),
-              td(r.n ? `${r.W} vs ${r.exp.toFixed(1)} (${r.z >= 0 ? "+" : ""}${r.z.toFixed(1)} SD)` : "—"),
-              td(r.cleared ? `<span class="ok">cleared</span>` : r.n ? "tracking" : "starts tonight", "l")];
+              td(r.n ? `${r.W} vs ${r.exp.toFixed(1)} (${r.z >= 0 ? "+" : ""}${r.z.toFixed(1)} SD)` : "—"), td(status, "l")];
+      if (pf.retired || r.cut) row.cls = "dim";
+      return row;
     }), "");
   const today = todayET(), games = Object.fromEntries(tonight().map(g => [g.gameId, g]));
   const rows = S.log.filter(e => e.date === today && e.model === MODEL_VERSION && e.pick && (e.pf || []).length)
