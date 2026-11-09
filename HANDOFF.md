@@ -89,6 +89,7 @@ Early season is still a little overconfident: in the first 10 games, the 50–60
 
 ## Session log
 
+- **9 Nov 2026, data read** (backup 2026-11-09): 368 graded, 200-168, +4.56u, +1.2%; Nov 7 not pulled; Nov 8 (7 games) 10-9, -1.21u, portfolio bets 4-5, -1.81u. Wins 200 vs market 190.1 (+1.0 SD) vs model 224.4. Unders 128-92 +3.3% (+1.5 SD); overs 72-76. Portfolios: B 23-12 +5.78, C 20-11 +4.31, D 35-25 +5.83 (A retired at 18-9). Brier dead even (942 lines). Credits 337.
 - **7 Nov 2026: A retired, cut rule added.** A is a structural copy of B (29 of B's first 30 bets; the 80% gate almost never bites), so `retired: "2026-11-07"`. It takes no new tags, its history stays, and it's shown dimmed at the bottom. Cut rule `PF_CUT_N = 150`, set before any portfolio was near it: judged once on each portfolio's first 150 graded bets in date order; if wins ≤ the books' no-vig expectation, the portfolio is cut for good (no new tags, dimmed). Self-test covers both.
 - **7 Nov 2026, data read** (backup 2026-11-07): 349 graded, 190-159, +5.77u, +1.7%; Nov 6 (9 games) 20-19, +0.73u; portfolio bets 9-7, +2.66u. Unders 122-85 +4.7% (+1.6 SD); overs 68-74. Portfolios: A 18-9 +4.94, B 19-9 +5.58, C 19-9 +5.77, D 32-21 +7.27. Brier tied. Credits 344.
 - **6 Nov 2026, data read** (backup 2026-11-06): 310 graded, 170-140, +5.04u, +1.6%; Nov 5 (2 games) 2-5, -3.25u. Wins 170 vs market 160.3 (+1.1 SD). Unders 110-75 +5.4% (+1.7 SD); overs 60-65 -4.0%. Portfolios: A 16-7 +4.44, B 17-7 +5.08, C 16-5 +7.39 (+2.0 SD), D 26-16 +4.99. Credits 353.
